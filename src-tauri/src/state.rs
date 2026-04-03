@@ -11,6 +11,7 @@
 //! work is done to avoid carrying unused dependencies.
 
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::audio::pipeline::ProcessedAudioChunk;
@@ -78,8 +79,10 @@ pub struct AppState {
     /// Whether capture is currently active.
     pub is_capturing: Arc<RwLock<bool>>,
 
-    /// Whether transcribe mode is active.
-    pub is_transcribing: Arc<RwLock<bool>>,
+    /// Whether transcribe mode is active (AtomicBool for lock-free flag checks
+    /// from the speech processor thread — fixes Bug 2: stop_transcribe now
+    /// actually terminates the speech processor).
+    pub is_transcribing: Arc<AtomicBool>,
 
     // ── Knowledge graph infrastructure ──────────────────────────────────
     /// The temporal knowledge graph engine.
@@ -110,11 +113,26 @@ pub struct AppState {
     /// Sender for processed audio (pipeline → downstream ASR).
     pub processed_tx: crossbeam_channel::Sender<ProcessedAudioChunk>,
 
-    /// Receiver for processed audio — cloneable for worker threads.
+    /// Receiver for processed audio — used by the dispatcher thread.
     pub processed_rx: crossbeam_channel::Receiver<ProcessedAudioChunk>,
 
     /// Handle to the pipeline worker thread.
     pub pipeline_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+
+    // ── Fan-out dispatcher (Bug 1 fix) ─────────────────────────────────
+    // The pipeline emits to `processed_tx` → `processed_rx`. A dispatcher
+    // thread reads from `processed_rx` and fans out to per-consumer channels
+    // so both the speech processor and Gemini receive ALL chunks (not split).
+    /// Per-speech-processor channel (dispatcher → speech processor).
+    pub speech_audio_tx: crossbeam_channel::Sender<ProcessedAudioChunk>,
+    pub speech_audio_rx: crossbeam_channel::Receiver<ProcessedAudioChunk>,
+
+    /// Per-Gemini channel (dispatcher → Gemini audio sender).
+    pub gemini_audio_tx: crossbeam_channel::Sender<ProcessedAudioChunk>,
+    pub gemini_audio_rx: crossbeam_channel::Receiver<ProcessedAudioChunk>,
+
+    /// Handle to the dispatcher thread that fans out processed audio.
+    pub dispatcher_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 
     // ── Speech processing pipeline ─────────────────────────────────────
     /// Handle to the speech processor (ASR + diarization) orchestrator thread.
@@ -148,12 +166,19 @@ impl AppState {
         let (pipeline_tx, pipeline_rx) = crossbeam_channel::bounded::<AudioChunk>(64);
         let (processed_tx, processed_rx) = crossbeam_channel::bounded::<ProcessedAudioChunk>(16);
 
+        // Per-consumer fan-out channels (Bug 1 fix):
+        // Each downstream consumer gets its own channel so both receive ALL chunks.
+        let (speech_audio_tx, speech_audio_rx) =
+            crossbeam_channel::bounded::<ProcessedAudioChunk>(16);
+        let (gemini_audio_tx, gemini_audio_rx) =
+            crossbeam_channel::bounded::<ProcessedAudioChunk>(16);
+
         Self {
             transcript_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(500))),
             graph_snapshot: Arc::new(RwLock::new(GraphSnapshot::default())),
             pipeline_status: Arc::new(RwLock::new(PipelineStatus::default())),
             is_capturing: Arc::new(RwLock::new(false)),
-            is_transcribing: Arc::new(RwLock::new(false)),
+            is_transcribing: Arc::new(AtomicBool::new(false)),
             knowledge_graph: Arc::new(Mutex::new(TemporalKnowledgeGraph::new())),
             graph_extractor: Arc::new(RuleBasedExtractor::new()),
             llm_engine: Arc::new(Mutex::new(None)),
@@ -164,6 +189,11 @@ impl AppState {
             pipeline_rx,
             processed_tx,
             processed_rx,
+            speech_audio_tx,
+            speech_audio_rx,
+            gemini_audio_tx,
+            gemini_audio_rx,
+            dispatcher_thread: Arc::new(Mutex::new(None)),
             pipeline_thread: Arc::new(Mutex::new(None)),
             speech_processor_thread: Arc::new(Mutex::new(None)),
             is_gemini_active: Arc::new(RwLock::new(false)),

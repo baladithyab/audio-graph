@@ -6,6 +6,8 @@
 //! Heavy processing logic (speech, extraction) lives in the [`crate::speech`]
 //! module — this file only contains thin `#[tauri::command]` wrappers.
 
+use std::sync::atomic::Ordering;
+
 use tauri::{Emitter, State};
 
 use crate::audio::pipeline::AudioPipeline;
@@ -105,6 +107,50 @@ pub async fn start_capture(
         }
     }
 
+    // 2b. Start dispatcher thread (Bug 1 fix): reads from processed_rx and
+    //     fans out to per-consumer channels so both speech processor and
+    //     Gemini receive ALL chunks.
+    {
+        let mut dispatcher_handle = state
+            .dispatcher_thread
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        if dispatcher_handle.is_none() {
+            let processed_rx = state.processed_rx.clone();
+            let speech_tx = state.speech_audio_tx.clone();
+            let gemini_tx = state.gemini_audio_tx.clone();
+            let is_transcribing = state.is_transcribing.clone();
+            let is_gemini_active = state.is_gemini_active.clone();
+
+            let handle = std::thread::Builder::new()
+                .name("audio-dispatcher".to_string())
+                .spawn(move || {
+                    log::info!("Audio dispatcher: starting fan-out loop");
+                    while let Ok(chunk) = processed_rx.recv() {
+                        // Forward to speech processor if transcribing
+                        if is_transcribing.load(Ordering::Relaxed) {
+                            // Best-effort send; if the speech channel is full, drop
+                            // to avoid blocking the pipeline.
+                            let _ = speech_tx.try_send(chunk.clone());
+                        }
+
+                        // Forward to Gemini if active
+                        let gemini_active = is_gemini_active
+                            .read()
+                            .map(|a| *a)
+                            .unwrap_or(false);
+                        if gemini_active {
+                            let _ = gemini_tx.try_send(chunk);
+                        }
+                    }
+                    log::info!("Audio dispatcher: exiting (pipeline channel closed)");
+                })
+                .map_err(|e| format!("Failed to spawn dispatcher thread: {}", e))?;
+            *dispatcher_handle = Some(handle);
+            log::info!("Audio dispatcher thread spawned");
+        }
+    }
+
     // 3. Update state flags.
     if let Ok(mut capturing) = state.is_capturing.write() {
         *capturing = true;
@@ -150,8 +196,10 @@ pub async fn stop_capture(
             *capturing = false;
         }
         // Also stop transcription since there's no more audio flowing
-        if let Ok(mut transcribing) = state.is_transcribing.write() {
-            *transcribing = false;
+        state.is_transcribing.store(false, Ordering::SeqCst);
+        // Clean up speech processor thread handle
+        if let Ok(mut sp_handle) = state.speech_processor_thread.lock() {
+            *sp_handle = None;
         }
         // Also stop Gemini if running
         if let Ok(mut gemini_active) = state.is_gemini_active.write() {
@@ -209,14 +257,8 @@ pub async fn start_transcribe(
     }
 
     // Guard: don't double-start
-    {
-        let transcribing = state
-            .is_transcribing
-            .read()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        if *transcribing {
-            return Err("Transcription is already running".to_string());
-        }
+    if state.is_transcribing.load(Ordering::SeqCst) {
+        return Err("Transcription is already running".to_string());
     }
 
     // 1. Start speech processor thread (ASR + Diarization orchestrator).
@@ -228,7 +270,10 @@ pub async fn start_transcribe(
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
         if sp_handle.is_none() {
-            let processed_rx = state.processed_rx.clone();
+            // Bug 1 fix: read from per-consumer channel, not shared processed_rx
+            let speech_rx = state.speech_audio_rx.clone();
+            // Bug 2 fix: pass AtomicBool so the speech processor can check it
+            let is_transcribing = state.is_transcribing.clone();
 
             let transcript_buffer = state.transcript_buffer.clone();
             let pipeline_status = state.pipeline_status.clone();
@@ -336,7 +381,8 @@ pub async fn start_transcribe(
                 .name("speech-processor".to_string())
                 .spawn(move || {
                     speech::run_speech_processor(
-                        processed_rx,
+                        speech_rx,
+                        is_transcribing,
                         transcript_buffer,
                         pipeline_status,
                         app_handle,
@@ -357,9 +403,7 @@ pub async fn start_transcribe(
     }
 
     // 3. Update state flags.
-    if let Ok(mut transcribing) = state.is_transcribing.write() {
-        *transcribing = true;
-    }
+    state.is_transcribing.store(true, Ordering::SeqCst);
     if let Ok(mut status) = state.pipeline_status.write() {
         status.asr = StageStatus::Running { processed_count: 0 };
         status.diarization = StageStatus::Running { processed_count: 0 };
@@ -377,9 +421,8 @@ pub async fn start_transcribe(
 
 /// Stop transcription without stopping capture.
 ///
-/// Sets the transcribing flag to false and updates pipeline status.
-/// The raw audio worker and speech processor threads will naturally stop
-/// when their channels are drained or on the next capture stop.
+/// Sets the AtomicBool flag to false so the speech processor thread exits
+/// on its next `recv_timeout` cycle (Bug 2 fix), then cleans up the thread handle.
 #[tauri::command]
 pub async fn stop_transcribe(
     state: State<'_, AppState>,
@@ -387,8 +430,13 @@ pub async fn stop_transcribe(
 ) -> Result<(), String> {
     log::info!("stop_transcribe called");
 
-    if let Ok(mut transcribing) = state.is_transcribing.write() {
-        *transcribing = false;
+    // Signal the speech processor to stop via AtomicBool
+    state.is_transcribing.store(false, Ordering::SeqCst);
+
+    // Clean up the speech processor thread handle — it will exit on its own
+    // via the flag check in its recv_timeout loop.
+    if let Ok(mut sp_handle) = state.speech_processor_thread.lock() {
+        *sp_handle = None;
     }
 
     // Update pipeline status — ASR and downstream stages go idle
@@ -899,7 +947,8 @@ pub async fn start_gemini(
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
         if audio_handle.is_none() {
-            let processed_rx = state.processed_rx.clone();
+            // Bug 1 fix: read from dedicated Gemini channel, not shared processed_rx
+            let gemini_rx = state.gemini_audio_rx.clone();
             let gemini_client = state.gemini_client.clone();
             let is_active = state.is_gemini_active.clone();
 
@@ -908,7 +957,7 @@ pub async fn start_gemini(
                 .spawn(move || {
                     log::info!("Gemini audio sender: starting");
 
-                    while let Ok(chunk) = processed_rx.recv() {
+                    while let Ok(chunk) = gemini_rx.recv() {
                         // Check if we should stop
                         let active = is_active
                             .read()

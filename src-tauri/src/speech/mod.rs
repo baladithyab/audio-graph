@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -308,6 +309,7 @@ impl AudioAccumulator {
 /// diarizes, then emits Tauri events and stores results.
 pub(crate) fn run_speech_processor(
     processed_rx: Receiver<ProcessedAudioChunk>,
+    is_transcribing: Arc<AtomicBool>,
     transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
     pipeline_status: Arc<RwLock<PipelineStatus>>,
     app_handle: AppHandle,
@@ -330,6 +332,7 @@ pub(crate) fn run_speech_processor(
         () => {
             run_speech_processor_diarization_only(
                 processed_rx,
+                is_transcribing,
                 transcript_buffer,
                 pipeline_status,
                 app_handle,
@@ -485,7 +488,26 @@ pub(crate) fn run_speech_processor(
 
     let mut accumulator = AudioAccumulator::new();
 
-    while let Ok(chunk) = processed_rx.recv() {
+    loop {
+        // Bug 2 fix: use recv_timeout so we periodically check the stop flag
+        let chunk = match processed_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(chunk) => chunk,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !is_transcribing.load(Ordering::Relaxed) {
+                    log::info!("Speech processor: is_transcribing flag cleared, exiting");
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
+
+        // Also check the flag on each received chunk for faster exit
+        if !is_transcribing.load(Ordering::Relaxed) {
+            log::info!("Speech processor: is_transcribing flag cleared, exiting");
+            break;
+        }
+
         // Accumulate chunks into ~2s segments
         let segment = match accumulator.feed(&chunk) {
             Some(seg) => seg,
@@ -609,6 +631,7 @@ pub(crate) fn run_speech_processor(
 /// segments with `[speech]` text and still performs speaker attribution.
 pub(crate) fn run_speech_processor_diarization_only(
     processed_rx: Receiver<ProcessedAudioChunk>,
+    is_transcribing: Arc<AtomicBool>,
     transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
     pipeline_status: Arc<RwLock<PipelineStatus>>,
     app_handle: AppHandle,
@@ -644,7 +667,28 @@ pub(crate) fn run_speech_processor_diarization_only(
 
     let mut accumulator = AudioAccumulator::new();
 
-    while let Ok(chunk) = processed_rx.recv() {
+    loop {
+        // Bug 2 fix: use recv_timeout so we periodically check the stop flag
+        let chunk = match processed_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(chunk) => chunk,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !is_transcribing.load(Ordering::Relaxed) {
+                    log::info!("Speech processor (diarization-only): is_transcribing flag cleared, exiting");
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
+
+        // Also check flag on each chunk for faster exit
+        if !is_transcribing.load(Ordering::Relaxed) {
+            log::info!(
+                "Speech processor (diarization-only): is_transcribing flag cleared, exiting"
+            );
+            break;
+        }
+
         let segment = match accumulator.feed(&chunk) {
             Some(seg) => seg,
             None => continue,

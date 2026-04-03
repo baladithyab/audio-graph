@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useAudioGraphStore } from "../store";
 import type {
   AsrProvider,
+  GeminiSettings,
   LlmApiConfig,
   LlmProvider,
   ModelReadiness,
@@ -62,6 +63,10 @@ function SettingsPage() {
   const [llmMaxTokens, setLlmMaxTokens] = useState(2048);
   const [llmTemperature, setLlmTemperature] = useState(0.7);
 
+  // Gemini settings
+  const [geminiApiKey, setGeminiApiKey] = useState("");
+  const [geminiModel, setGeminiModel] = useState("gemini-3.1-flash-live-preview");
+
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   // Sync local state when settings are loaded
@@ -92,6 +97,12 @@ function SettingsPage() {
     if (settings.llm_api_config) {
       setLlmMaxTokens(settings.llm_api_config.max_tokens);
       setLlmTemperature(settings.llm_api_config.temperature);
+    }
+
+    // Gemini settings (Bug 3 fix: preserve Gemini config across saves)
+    if (settings.gemini) {
+      setGeminiApiKey(settings.gemini.api_key);
+      setGeminiModel(settings.gemini.model);
     }
   }, [settings]);
 
@@ -128,6 +139,12 @@ function SettingsPage() {
           }
         : null;
 
+    // Bug 3 fix: include gemini settings in the save payload
+    const gemini: GeminiSettings = {
+      api_key: geminiApiKey,
+      model: geminiModel,
+    };
+
     await saveSettings({
       asr_provider: asrProvider,
       llm_provider: llmProvider,
@@ -136,6 +153,7 @@ function SettingsPage() {
         sample_rate: 16000,
         channels: 1,
       },
+      gemini,
     });
   };
 
@@ -414,6 +432,35 @@ function SettingsPage() {
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* ── Gemini Live Section ──────────────────────────── */}
+            <div className="settings-section">
+              <h3 className="settings-section__title">Gemini Live</h3>
+              <div className="settings-section__api-fields">
+                <div className="settings-field">
+                  <label className="settings-field__label">
+                    Gemini API Key
+                  </label>
+                  <input
+                    className="settings-input"
+                    type="password"
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                    placeholder="AIza..."
+                  />
+                </div>
+                <div className="settings-field">
+                  <label className="settings-field__label">Model</label>
+                  <input
+                    className="settings-input"
+                    type="text"
+                    value={geminiModel}
+                    onChange={(e) => setGeminiModel(e.target.value)}
+                    placeholder="gemini-3.1-flash-live-preview"
+                  />
+                </div>
+              </div>
             </div>
           </div>
         )}
