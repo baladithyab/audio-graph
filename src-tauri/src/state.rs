@@ -78,6 +78,9 @@ pub struct AppState {
     /// Whether capture is currently active.
     pub is_capturing: Arc<RwLock<bool>>,
 
+    /// Whether transcribe mode (VAD bypass) is active.
+    pub is_transcribing: Arc<RwLock<bool>>,
+
     // ── Knowledge graph infrastructure ──────────────────────────────────
     /// The temporal knowledge graph engine.
     pub knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
@@ -120,8 +123,17 @@ pub struct AppState {
     /// Receiver for speech segments — cloneable for worker threads.
     pub speech_rx: crossbeam_channel::Receiver<SpeechSegment>,
 
+    /// Sender for raw processed audio (bypasses VAD → speech processor).
+    pub raw_audio_tx: crossbeam_channel::Sender<ProcessedAudioChunk>,
+
+    /// Receiver for raw audio — cloneable for worker threads.
+    pub raw_audio_rx: crossbeam_channel::Receiver<ProcessedAudioChunk>,
+
     /// Handle to the VAD worker thread.
     pub vad_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+
+    /// Handle to the raw audio worker thread (VAD bypass).
+    pub raw_audio_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 
     /// Handle to the speech processor (ASR + diarization) orchestrator thread.
     pub speech_processor_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
@@ -139,15 +151,18 @@ impl AppState {
         //   pipeline: 64 chunks (~2s of audio at 32ms/chunk)
         //   processed: 16 chunks (VAD processes quickly)
         //   speech: 32 segments (speech segments are larger but less frequent)
+        //   raw_audio: 16 chunks (direct pipeline → ASR in transcribe mode)
         let (pipeline_tx, pipeline_rx) = crossbeam_channel::bounded::<AudioChunk>(64);
         let (processed_tx, processed_rx) = crossbeam_channel::bounded::<ProcessedAudioChunk>(16);
         let (speech_tx, speech_rx) = crossbeam_channel::bounded::<SpeechSegment>(32);
+        let (raw_audio_tx, raw_audio_rx) = crossbeam_channel::bounded::<ProcessedAudioChunk>(16);
 
         Self {
             transcript_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(500))),
             graph_snapshot: Arc::new(RwLock::new(GraphSnapshot::default())),
             pipeline_status: Arc::new(RwLock::new(PipelineStatus::default())),
             is_capturing: Arc::new(RwLock::new(false)),
+            is_transcribing: Arc::new(RwLock::new(false)),
             knowledge_graph: Arc::new(Mutex::new(TemporalKnowledgeGraph::new())),
             graph_extractor: Arc::new(RuleBasedExtractor::new()),
             llm_engine: Arc::new(Mutex::new(None)),
@@ -161,7 +176,10 @@ impl AppState {
             pipeline_thread: Arc::new(Mutex::new(None)),
             speech_tx,
             speech_rx,
+            raw_audio_tx,
+            raw_audio_rx,
             vad_thread: Arc::new(Mutex::new(None)),
+            raw_audio_thread: Arc::new(Mutex::new(None)),
             speech_processor_thread: Arc::new(Mutex::new(None)),
             app_settings: Arc::new(RwLock::new(crate::settings::AppSettings::default())),
         }

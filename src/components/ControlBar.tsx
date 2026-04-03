@@ -3,11 +3,14 @@ import { useAudioGraphStore } from "../store";
 
 function ControlBar() {
   const isCapturing = useAudioGraphStore((s) => s.isCapturing);
+  const isTranscribing = useAudioGraphStore((s) => s.isTranscribing);
   const selectedSourceIds = useAudioGraphStore((s) => s.selectedSourceIds);
   const audioSources = useAudioGraphStore((s) => s.audioSources);
   const captureStartTime = useAudioGraphStore((s) => s.captureStartTime);
   const startCapture = useAudioGraphStore((s) => s.startCapture);
   const stopCapture = useAudioGraphStore((s) => s.stopCapture);
+  const startTranscribe = useAudioGraphStore((s) => s.startTranscribe);
+  const stopTranscribe = useAudioGraphStore((s) => s.stopTranscribe);
   const openSettings = useAudioGraphStore((s) => s.openSettings);
 
   const [elapsed, setElapsed] = useState("00:00");
@@ -41,11 +44,21 @@ function ControlBar() {
     }
   }, [isCapturing, startCapture, stopCapture]);
 
+  const handleToggleTranscribe = useCallback(async () => {
+    if (isTranscribing) {
+      await stopTranscribe();
+    } else {
+      await startTranscribe();
+    }
+  }, [isTranscribing, startTranscribe, stopTranscribe]);
+
   // Find selected source names
   const selectedSources = audioSources.filter((s) =>
     selectedSourceIds.includes(s.id),
   );
   const canStart = selectedSourceIds.length > 0 && !isCapturing;
+  // Transcribe requires capture to be running
+  const canTranscribe = isCapturing && !isTranscribing;
   const selectedLabel = selectedSources.map((s) => s.name).join(", ");
 
   return (
@@ -66,6 +79,19 @@ function ControlBar() {
           aria-label={isCapturing ? "Stop capture" : "Start capture"}
         >
           {isCapturing ? "⏹ Stop" : "⏺ Start"}
+        </button>
+
+        <button
+          className={`control-bar__transcribe-btn ${isTranscribing ? "control-bar__transcribe-btn--active" : ""}`}
+          onClick={handleToggleTranscribe}
+          disabled={!canTranscribe && !isTranscribing}
+          aria-label={isTranscribing ? "Stop transcription" : "Start transcription"}
+          title={isCapturing ? "Stream audio directly to Whisper ASR" : "Start capture first"}
+        >
+          {isTranscribing && (
+            <span className="control-bar__transcribe-dot" aria-hidden="true" />
+          )}
+          {isTranscribing ? "Stop Transcribe" : "Transcribe"}
         </button>
 
         {isCapturing && (

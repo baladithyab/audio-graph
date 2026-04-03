@@ -26,13 +26,13 @@ vulkan = [
 # Audio capture (rsac library from GitHub)
 # Platform-conditional: each OS pulls in only its own backend feature.
 [target.'cfg(target_os = "linux")'.dependencies]
-rsac = { git = "https://github.com/baladithyab/rust-crossplat-audio-capture.git", features = ["feat_linux"], branch = "main" }
+rsac = { git = "https://github.com/baladithyab/rust-crossplat-audio-capture.git", features = ["feat_linux"], branch = "master" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-rsac = { git = "https://github.com/baladithyab/rust-crossplat-audio-capture.git", features = ["feat_windows"], branch = "main" }
+rsac = { git = "https://github.com/baladithyab/rust-crossplat-audio-capture.git", features = ["feat_windows"], branch = "master" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-rsac = { git = "https://github.com/baladithyab/rust-crossplat-audio-capture.git", features = ["feat_macos"], branch = "main" }
+rsac = { git = "https://github.com/baladithyab/rust-crossplat-audio-capture.git", features = ["feat_macos"], branch = "master" }
 # Enable Metal GPU acceleration on macOS for Whisper ASR and llama.cpp LLM inference.
 # Both crates detect Apple Metal via their build.rs, but the feature flag must be
 # opted-in explicitly to link the Metal framework and compile the GPU kernels.

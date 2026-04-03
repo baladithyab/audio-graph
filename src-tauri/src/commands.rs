@@ -9,7 +9,6 @@
 use tauri::{Emitter, State};
 
 use crate::audio::pipeline::AudioPipeline;
-use crate::audio::vad::{VadConfig, VadProcessor};
 use crate::events::{self, PipelineStatus, StageStatus};
 use crate::graph::entities::GraphSnapshot;
 use crate::llm::engine::{ChatMessage, ChatResponse};
@@ -105,31 +104,195 @@ pub async fn start_capture(
         }
     }
 
-    // 3. Start VAD thread if not already running.
+    // 3. Update state flags.
+    if let Ok(mut capturing) = state.is_capturing.write() {
+        *capturing = true;
+    }
+    if let Ok(mut status) = state.pipeline_status.write() {
+        status.capture = StageStatus::Running { processed_count: 0 };
+        status.pipeline = StageStatus::Running { processed_count: 0 };
+    }
+
+    // Emit initial pipeline status event
+    if let Ok(status) = state.pipeline_status.read() {
+        let _ = app.emit(events::PIPELINE_STATUS_EVENT, &*status);
+    }
+
+    log::info!("Started capture for source: {}", source_id);
+    Ok(())
+}
+
+/// Stop capturing audio from the specified source.
+///
+/// If this was the last active capture, also stops transcription (if running)
+/// since there is no more audio to transcribe.
+#[tauri::command]
+pub async fn stop_capture(
+    source_id: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    log::info!("stop_capture called for source: {}", source_id);
+
+    let remaining;
     {
-        let mut vad_handle = state
-            .vad_thread
+        let mut manager = state
+            .capture_manager
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
-        if vad_handle.is_none() {
-            let processed_rx = state.processed_rx.clone();
-            let speech_tx = state.speech_tx.clone();
-            let vad_config = VadConfig::default();
+        manager.stop_capture(&source_id)?;
+        remaining = manager.active_captures().len();
+    }
 
-            let handle = std::thread::Builder::new()
-                .name("vad-worker".to_string())
-                .spawn(move || {
-                    let mut processor = VadProcessor::new(vad_config, speech_tx);
-                    processor.run(processed_rx);
-                    log::info!("VAD worker thread exited");
-                })
-                .map_err(|e| format!("Failed to spawn VAD thread: {}", e))?;
-            *vad_handle = Some(handle);
-            log::info!("VAD worker thread spawned");
+    if remaining == 0 {
+        if let Ok(mut capturing) = state.is_capturing.write() {
+            *capturing = false;
+        }
+        // Also stop transcription since there's no more audio flowing
+        if let Ok(mut transcribing) = state.is_transcribing.write() {
+            *transcribing = false;
+        }
+        if let Ok(mut status) = state.pipeline_status.write() {
+            status.capture = StageStatus::Idle;
+            status.pipeline = StageStatus::Idle;
+            status.asr = StageStatus::Idle;
+            status.diarization = StageStatus::Idle;
+            status.entity_extraction = StageStatus::Idle;
+            status.graph = StageStatus::Idle;
+        }
+
+        // Emit updated pipeline status
+        if let Ok(status) = state.pipeline_status.read() {
+            let _ = app.emit(events::PIPELINE_STATUS_EVENT, &*status);
         }
     }
 
-    // 4. Start speech processor thread (ASR + Diarization orchestrator).
+    log::info!("Stopped capture for source: {}", source_id);
+    Ok(())
+}
+
+/// Start transcription (streaming processed audio → ASR, bypassing VAD).
+///
+/// Requires capture to already be running. Spawns a raw-audio worker thread
+/// that reads from the processed audio channel (pipeline output) and wraps
+/// chunks into SpeechSegments for the speech processor, plus the speech
+/// processor itself (ASR + diarization + entity extraction).
+#[tauri::command]
+pub async fn start_transcribe(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    log::info!("start_transcribe called");
+
+    // Guard: capture must be running
+    {
+        let capturing = state
+            .is_capturing
+            .read()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        if !*capturing {
+            return Err("Cannot start transcription: capture is not running".to_string());
+        }
+    }
+
+    // Guard: don't double-start
+    {
+        let transcribing = state
+            .is_transcribing
+            .read()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        if *transcribing {
+            return Err("Transcription is already running".to_string());
+        }
+    }
+
+    // 1. Start raw-audio-to-speech worker (reads processed_rx, bypasses VAD).
+    //    This worker reads from the pipeline's processed audio channel and
+    //    wraps each chunk into a SpeechSegment for the speech processor.
+    {
+        let mut raw_handle = state
+            .raw_audio_thread
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        if raw_handle.is_none() {
+            let processed_rx = state.processed_rx.clone();
+            let speech_tx = state.speech_tx.clone();
+
+            let handle = std::thread::Builder::new()
+                .name("raw-audio-worker".to_string())
+                .spawn(move || {
+                    use crate::audio::vad::SpeechSegment;
+                    use std::time::Duration;
+
+                    log::info!("Raw audio worker: starting (VAD bypass, streaming to ASR)");
+
+                    // Accumulate chunks into ~2 second segments for better
+                    // Whisper transcription quality (individual 32ms chunks
+                    // are too short for coherent speech recognition).
+                    const TARGET_FRAMES: usize = 16_000 * 2; // 2s at 16kHz
+                    let mut accum_audio: Vec<f32> = Vec::with_capacity(TARGET_FRAMES);
+                    let mut accum_source_id = String::new();
+                    let mut segment_start: Option<Duration> = None;
+                    let mut segment_end: Duration = Duration::ZERO;
+
+                    while let Ok(chunk) = processed_rx.recv() {
+                        if accum_source_id.is_empty() {
+                            accum_source_id = chunk.source_id.clone();
+                        }
+                        if segment_start.is_none() {
+                            segment_start = chunk.timestamp;
+                        }
+                        segment_end = chunk
+                            .timestamp
+                            .unwrap_or(Duration::ZERO);
+
+                        accum_audio.extend_from_slice(&chunk.data);
+
+                        // Flush when we've accumulated enough audio
+                        if accum_audio.len() >= TARGET_FRAMES {
+                            let audio = std::mem::replace(
+                                &mut accum_audio,
+                                Vec::with_capacity(TARGET_FRAMES),
+                            );
+                            let num_frames = audio.len();
+                            let segment = SpeechSegment {
+                                source_id: accum_source_id.clone(),
+                                audio,
+                                start_time: segment_start.unwrap_or(Duration::ZERO),
+                                end_time: segment_end,
+                                num_frames,
+                            };
+                            segment_start = None;
+
+                            if let Err(e) = speech_tx.send(segment) {
+                                log::warn!("Raw audio worker: downstream closed: {}", e);
+                                break;
+                            }
+                        }
+                    }
+
+                    // Flush any remaining audio
+                    if !accum_audio.is_empty() {
+                        let num_frames = accum_audio.len();
+                        let segment = SpeechSegment {
+                            source_id: accum_source_id,
+                            audio: accum_audio,
+                            start_time: segment_start.unwrap_or(Duration::ZERO),
+                            end_time: segment_end,
+                            num_frames,
+                        };
+                        let _ = speech_tx.send(segment);
+                    }
+
+                    log::info!("Raw audio worker: exiting");
+                })
+                .map_err(|e| format!("Failed to spawn raw audio thread: {}", e))?;
+            *raw_handle = Some(handle);
+            log::info!("Raw audio worker thread spawned");
+        }
+    }
+
+    // 2. Start speech processor thread (ASR + Diarization orchestrator).
     {
         let mut sp_handle = state
             .speech_processor_thread
@@ -149,17 +312,12 @@ pub async fn start_capture(
 
             let models_dir = crate::models::get_models_dir(&app);
 
-            // Read the ASR provider setting so the speech processor knows
-            // whether to load the local Whisper model or skip it.
             let asr_provider = state
                 .app_settings
                 .read()
                 .map(|s| s.asr_provider.clone())
                 .unwrap_or_default();
 
-            // Read the LLM provider setting so the speech processor knows
-            // whether to use the local LLM engine or the API client for
-            // entity extraction.
             let llm_provider = state
                 .app_settings
                 .read()
@@ -213,9 +371,6 @@ pub async fn start_capture(
                     .map(|g| g.is_none())
                     .unwrap_or(false);
                 if api_empty && !endpoint.is_empty() {
-                    // Read advanced parameters from the user's persisted
-                    // llm_api_config settings, falling back to
-                    // extraction-oriented defaults.
                     let (api_max_tokens, api_temperature) = state
                         .app_settings
                         .read()
@@ -268,57 +423,58 @@ pub async fn start_capture(
                 })
                 .map_err(|e| format!("Failed to spawn speech processor thread: {}", e))?;
             *sp_handle = Some(handle);
-            log::info!("Speech processor thread spawned");
+            log::info!("Speech processor thread spawned for transcribe");
         }
     }
 
-    // 5. Update state flags.
-    if let Ok(mut capturing) = state.is_capturing.write() {
-        *capturing = true;
+    // 3. Update state flags.
+    if let Ok(mut transcribing) = state.is_transcribing.write() {
+        *transcribing = true;
     }
     if let Ok(mut status) = state.pipeline_status.write() {
-        status.capture = StageStatus::Running { processed_count: 0 };
-        status.pipeline = StageStatus::Running { processed_count: 0 };
         status.asr = StageStatus::Running { processed_count: 0 };
         status.diarization = StageStatus::Running { processed_count: 0 };
         status.entity_extraction = StageStatus::Running { processed_count: 0 };
         status.graph = StageStatus::Running { processed_count: 0 };
     }
 
-    // Emit initial pipeline status event
     if let Ok(status) = state.pipeline_status.read() {
         let _ = app.emit(events::PIPELINE_STATUS_EVENT, &*status);
     }
 
-    log::info!("Started capture for source: {}", source_id);
+    log::info!("Started transcription (streaming mode, VAD bypassed)");
     Ok(())
 }
 
-/// Stop capturing audio from the specified source.
+/// Stop transcription without stopping capture.
+///
+/// Sets the transcribing flag to false and updates pipeline status.
+/// The raw audio worker and speech processor threads will naturally stop
+/// when their channels are drained or on the next capture stop.
 #[tauri::command]
-pub async fn stop_capture(source_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    log::info!("stop_capture called for source: {}", source_id);
+pub async fn stop_transcribe(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    log::info!("stop_transcribe called");
 
-    let remaining;
-    {
-        let mut manager = state
-            .capture_manager
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        manager.stop_capture(&source_id)?;
-        remaining = manager.active_captures().len();
+    if let Ok(mut transcribing) = state.is_transcribing.write() {
+        *transcribing = false;
     }
 
-    if remaining == 0 {
-        if let Ok(mut capturing) = state.is_capturing.write() {
-            *capturing = false;
-        }
-        if let Ok(mut status) = state.pipeline_status.write() {
-            status.capture = StageStatus::Idle;
-        }
+    // Update pipeline status — ASR and downstream stages go idle
+    if let Ok(mut status) = state.pipeline_status.write() {
+        status.asr = StageStatus::Idle;
+        status.diarization = StageStatus::Idle;
+        status.entity_extraction = StageStatus::Idle;
+        status.graph = StageStatus::Idle;
     }
 
-    log::info!("Stopped capture for source: {}", source_id);
+    if let Ok(status) = state.pipeline_status.read() {
+        let _ = app.emit(events::PIPELINE_STATUS_EVENT, &*status);
+    }
+
+    log::info!("Stopped transcription");
     Ok(())
 }
 

@@ -124,7 +124,38 @@ export const useAudioGraphStore = create<AudioGraphStore>((set, get) => ({
             }
             set({
                 isCapturing: false,
+                isTranscribing: false,
                 captureStartTime: null,
+                error: null,
+            });
+        } catch (e) {
+            set({ error: e instanceof Error ? e.message : String(e) });
+        }
+    },
+
+    // ── Transcribe state ────────────────────────────────────────────────────────
+    isTranscribing: false,
+    startTranscribe: async () => {
+        const { isCapturing } = get();
+        if (!isCapturing) {
+            set({ error: "Cannot start transcription: capture is not running" });
+            return;
+        }
+        try {
+            await invoke("start_transcribe");
+            set({
+                isTranscribing: true,
+                error: null,
+            });
+        } catch (e) {
+            set({ error: e instanceof Error ? e.message : String(e) });
+        }
+    },
+    stopTranscribe: async () => {
+        try {
+            await invoke("stop_transcribe");
+            set({
+                isTranscribing: false,
                 error: null,
             });
         } catch (e) {

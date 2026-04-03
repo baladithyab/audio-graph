@@ -37,6 +37,8 @@ pub fn run() {
             commands::list_audio_sources,
             commands::start_capture,
             commands::stop_capture,
+            commands::start_transcribe,
+            commands::stop_transcribe,
             commands::get_graph_snapshot,
             commands::get_transcript,
             commands::get_pipeline_status,

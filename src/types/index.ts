@@ -279,6 +279,11 @@ export interface AudioGraphStore {
     startCapture: () => Promise<void>;
     stopCapture: () => Promise<void>;
 
+    // Transcribe state (VAD-bypassing manual transcription)
+    isTranscribing: boolean;
+    startTranscribe: () => Promise<void>;
+    stopTranscribe: () => Promise<void>;
+
     // Error state
     error: string | null;
     setError: (error: string | null) => void;
