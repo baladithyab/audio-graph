@@ -1,0 +1,101 @@
+# AudioGraph CI — Tauri v2 desktop app
+# Frontend checks + Rust backend checks per platform
+
+name: AudioGraph CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Frontend (fast, platform-independent) ──────────────────────────
+  frontend:
+    name: Frontend (TypeScript)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+
+  # ── Rust backend — Linux ───────────────────────────────────────────
+  rust-linux:
+    name: Rust (Linux)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install system dependencies
+        run: |
+          sudo add-apt-repository ppa:pipewire-debian/pipewire-upstream -y
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev cmake clang libclang-dev pkg-config
+
+      - name: Cargo check
+        run: cargo check
+        working-directory: src-tauri
+
+      - name: Cargo test
+        run: cargo test -- --test-threads=1
+        working-directory: src-tauri
+
+  # ── Rust backend — macOS ───────────────────────────────────────────
+  rust-macos:
+    name: Rust (macOS)
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install system dependencies
+        run: brew install cmake
+
+      - name: Cargo check
+        run: cargo check
+        working-directory: src-tauri
+
+      - name: Cargo test
+        run: cargo test -- --test-threads=1
+        working-directory: src-tauri
+
+  # ── Rust backend — Windows ─────────────────────────────────────────
+  rust-windows:
+    name: Rust (Windows)
+    runs-on: blacksmith-4vcpu-windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install system dependencies
+        run: choco install cmake llvm -y
+
+      - name: Cargo check
+        run: cargo check
+        working-directory: src-tauri
+
+      - name: Cargo test
+        run: cargo test -- --test-threads=1
+        working-directory: src-tauri
