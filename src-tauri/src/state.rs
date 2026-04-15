@@ -23,6 +23,7 @@ use crate::graph::extraction::RuleBasedExtractor;
 use crate::graph::temporal::TemporalKnowledgeGraph;
 use crate::llm::engine::ChatMessage;
 use crate::llm::{ApiClient, LlmEngine};
+use crate::persistence::TranscriptWriter;
 
 /// Transcript segment for frontend consumption.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -67,11 +68,20 @@ pub struct SpeakerInfo {
 
 /// Central application state, shared across Tauri commands and worker threads.
 pub struct AppState {
+    /// Unique session ID generated at app start (UUID v4).
+    pub session_id: String,
+
     /// Buffer of transcript segments (most recent last).
     pub transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
 
+    /// Async transcript writer (appends to JSONL file on disk).
+    pub transcript_writer: Arc<Mutex<Option<TranscriptWriter>>>,
+
     /// Current knowledge graph snapshot.
     pub graph_snapshot: Arc<RwLock<GraphSnapshot>>,
+
+    /// Handle to the graph auto-save background thread.
+    pub graph_autosave_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 
     /// Current pipeline status.
     pub pipeline_status: Arc<RwLock<PipelineStatus>>,
@@ -138,6 +148,9 @@ pub struct AppState {
     /// Handle to the speech processor (ASR + diarization) orchestrator thread.
     pub speech_processor_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 
+    /// Handle to the ASR worker thread (decoupled from accumulator).
+    pub asr_worker_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+
     // ── Gemini Live pipeline ───────────────────────────────────────────────
     /// Whether the Gemini Live pipeline is active.
     pub is_gemini_active: Arc<RwLock<bool>>,
@@ -168,14 +181,28 @@ impl AppState {
 
         // Per-consumer fan-out channels (Bug 1 fix):
         // Each downstream consumer gets its own channel so both receive ALL chunks.
+        // Speech channel sized at 256 (~8s at 32ms/chunk) to absorb ASR latency spikes.
         let (speech_audio_tx, speech_audio_rx) =
-            crossbeam_channel::bounded::<ProcessedAudioChunk>(16);
+            crossbeam_channel::bounded::<ProcessedAudioChunk>(256);
         let (gemini_audio_tx, gemini_audio_rx) =
             crossbeam_channel::bounded::<ProcessedAudioChunk>(16);
 
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        // Spawn transcript writer (best-effort — if base dir is unavailable, None)
+        let transcript_writer = TranscriptWriter::spawn(&session_id);
+        if transcript_writer.is_some() {
+            log::info!("Transcript persistence enabled for session {}", session_id);
+        } else {
+            log::warn!("Transcript persistence disabled (could not resolve data directory)");
+        }
+
         Self {
+            session_id,
             transcript_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(500))),
+            transcript_writer: Arc::new(Mutex::new(transcript_writer)),
             graph_snapshot: Arc::new(RwLock::new(GraphSnapshot::default())),
+            graph_autosave_thread: Arc::new(Mutex::new(None)),
             pipeline_status: Arc::new(RwLock::new(PipelineStatus::default())),
             is_capturing: Arc::new(RwLock::new(false)),
             is_transcribing: Arc::new(AtomicBool::new(false)),
@@ -196,6 +223,7 @@ impl AppState {
             dispatcher_thread: Arc::new(Mutex::new(None)),
             pipeline_thread: Arc::new(Mutex::new(None)),
             speech_processor_thread: Arc::new(Mutex::new(None)),
+            asr_worker_thread: Arc::new(Mutex::new(None)),
             is_gemini_active: Arc::new(RwLock::new(false)),
             gemini_client: Arc::new(Mutex::new(None)),
             gemini_audio_thread: Arc::new(Mutex::new(None)),

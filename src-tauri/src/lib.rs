@@ -2,14 +2,15 @@
 //!
 //! This is the Tauri backend for the AudioGraph application.
 //! Module structure:
-//!   state     — AppState definition (Arc<Mutex<...>>)
-//!   commands  — Tauri IPC command handlers
-//!   events    — Event name constants and payload types
-//!   audio     — Audio capture manager + processing pipeline
-//!   asr       — Automatic speech recognition (whisper-rs)
+//!   state       — AppState definition (Arc<Mutex<...>>)
+//!   commands    — Tauri IPC command handlers
+//!   events      — Event name constants and payload types
+//!   audio       — Audio capture manager + processing pipeline
+//!   asr         — Automatic speech recognition (whisper-rs)
 //!   diarization — Speaker diarization (pyannote-rs)
-//!   graph     — Temporal knowledge graph (petgraph)
-//!   models    — Model management and downloading
+//!   graph       — Temporal knowledge graph (petgraph)
+//!   models      — Model management and downloading
+//!   persistence — File-based persistence (transcripts + knowledge graph)
 
 pub mod asr;
 pub mod audio;
@@ -20,6 +21,7 @@ pub mod gemini;
 pub mod graph;
 pub mod llm;
 pub mod models;
+pub mod persistence;
 pub mod settings;
 pub mod speech;
 pub mod state;
@@ -31,6 +33,17 @@ pub fn run() {
     env_logger::init();
 
     let app_state = AppState::new();
+
+    // Spawn graph auto-save background thread (saves every 30s).
+    {
+        let handle = persistence::spawn_graph_autosave(
+            &app_state.session_id,
+            app_state.knowledge_graph.clone(),
+        );
+        if let Ok(mut guard) = app_state.graph_autosave_thread.lock() {
+            *guard = handle;
+        }
+    }
 
     tauri::Builder::default()
         .manage(app_state)
@@ -57,6 +70,12 @@ pub fn run() {
             commands::list_running_processes,
             commands::start_gemini,
             commands::stop_gemini,
+            // Persistence commands
+            commands::export_transcript,
+            commands::save_graph,
+            commands::load_graph,
+            commands::export_graph,
+            commands::get_session_id,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AudioGraph");

@@ -126,12 +126,21 @@ pub async fn start_capture(
                 .name("audio-dispatcher".to_string())
                 .spawn(move || {
                     log::info!("Audio dispatcher: starting fan-out loop");
+                    let mut speech_drop_count: u64 = 0;
+                    let mut gemini_drop_count: u64 = 0;
                     while let Ok(chunk) = processed_rx.recv() {
                         // Forward to speech processor if transcribing
                         if is_transcribing.load(Ordering::Relaxed) {
-                            // Best-effort send; if the speech channel is full, drop
-                            // to avoid blocking the pipeline.
-                            let _ = speech_tx.try_send(chunk.clone());
+                            if let Err(_) = speech_tx.try_send(chunk.clone()) {
+                                speech_drop_count += 1;
+                                if speech_drop_count % 10 == 1 {
+                                    log::warn!(
+                                        "Audio dispatcher: speech channel full, dropped {} chunks total \
+                                         (consumer too slow — ASR inference may be blocking)",
+                                        speech_drop_count
+                                    );
+                                }
+                            }
                         }
 
                         // Forward to Gemini if active
@@ -140,10 +149,22 @@ pub async fn start_capture(
                             .map(|a| *a)
                             .unwrap_or(false);
                         if gemini_active {
-                            let _ = gemini_tx.try_send(chunk);
+                            if let Err(_) = gemini_tx.try_send(chunk) {
+                                gemini_drop_count += 1;
+                                if gemini_drop_count % 10 == 1 {
+                                    log::warn!(
+                                        "Audio dispatcher: gemini channel full, dropped {} chunks total",
+                                        gemini_drop_count
+                                    );
+                                }
+                            }
                         }
                     }
-                    log::info!("Audio dispatcher: exiting (pipeline channel closed)");
+                    log::info!(
+                        "Audio dispatcher: exiting (pipeline channel closed). \
+                         Total drops: speech={}, gemini={}",
+                        speech_drop_count, gemini_drop_count
+                    );
                 })
                 .map_err(|e| format!("Failed to spawn dispatcher thread: {}", e))?;
             *dispatcher_handle = Some(handle);
@@ -200,6 +221,10 @@ pub async fn stop_capture(
         // Clean up speech processor thread handle
         if let Ok(mut sp_handle) = state.speech_processor_thread.lock() {
             *sp_handle = None;
+        }
+        // Clean up ASR worker thread handle
+        if let Ok(mut asr_handle) = state.asr_worker_thread.lock() {
+            *asr_handle = None;
         }
         // Also stop Gemini if running
         if let Ok(mut gemini_active) = state.is_gemini_active.write() {
@@ -377,6 +402,8 @@ pub async fn start_transcribe(
                 }
             }
 
+            let transcript_writer = state.transcript_writer.clone();
+
             let handle = std::thread::Builder::new()
                 .name("speech-processor".to_string())
                 .spawn(move || {
@@ -384,6 +411,7 @@ pub async fn start_transcribe(
                         speech_rx,
                         is_transcribing,
                         transcript_buffer,
+                        transcript_writer,
                         pipeline_status,
                         app_handle,
                         knowledge_graph,
@@ -437,6 +465,10 @@ pub async fn stop_transcribe(
     // via the flag check in its recv_timeout loop.
     if let Ok(mut sp_handle) = state.speech_processor_thread.lock() {
         *sp_handle = None;
+    }
+    // Clean up the ASR worker thread handle
+    if let Ok(mut asr_handle) = state.asr_worker_thread.lock() {
+        *asr_handle = None;
     }
 
     // Update pipeline status — ASR and downstream stages go idle
@@ -1197,4 +1229,95 @@ pub fn list_running_processes() -> Vec<ProcessInfo> {
     processes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     processes.dedup_by(|a, b| a.name == b.name);
     processes
+}
+
+// ---------------------------------------------------------------------------
+// Persistence commands (transcript + knowledge graph)
+// ---------------------------------------------------------------------------
+
+/// Export the full in-memory transcript buffer as a JSON string.
+#[tauri::command]
+pub async fn export_transcript(state: State<'_, AppState>) -> Result<String, String> {
+    let buffer = state
+        .transcript_buffer
+        .read()
+        .map_err(|e| format!("Failed to read transcript buffer: {}", e))?;
+    let segments: Vec<TranscriptSegment> = buffer.iter().cloned().collect();
+    serde_json::to_string_pretty(&segments)
+        .map_err(|e| format!("Failed to serialize transcript: {}", e))
+}
+
+/// Save the knowledge graph to disk (session-specific file).
+#[tauri::command]
+pub async fn save_graph(state: State<'_, AppState>) -> Result<String, String> {
+    let dir = crate::persistence::graphs_dir()
+        .ok_or_else(|| "Cannot resolve graph save directory".to_string())?;
+
+    let file_path = dir.join(format!("{}.json", state.session_id));
+
+    let graph = state
+        .knowledge_graph
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    graph.save_to_file(&file_path)?;
+
+    log::info!("Graph saved to {:?}", file_path);
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+/// Load a knowledge graph from a file on disk, replacing the current graph.
+///
+/// `path` is the absolute path to the JSON graph file.
+#[tauri::command]
+pub async fn load_graph(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let file_path = std::path::PathBuf::from(&path);
+
+    if !file_path.exists() {
+        return Err(format!("Graph file not found: {}", path));
+    }
+
+    let loaded =
+        crate::graph::temporal::TemporalKnowledgeGraph::load_from_file(&file_path)?;
+
+    // Replace the in-memory knowledge graph
+    {
+        let mut graph = state
+            .knowledge_graph
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        *graph = loaded;
+    }
+
+    // Update the cached snapshot
+    {
+        let graph = state
+            .knowledge_graph
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let snapshot = graph.snapshot();
+        if let Ok(mut gs) = state.graph_snapshot.write() {
+            *gs = snapshot;
+        }
+    }
+
+    log::info!("Graph loaded from {:?}", file_path);
+    Ok(())
+}
+
+/// Export the knowledge graph as a JSON string (for clipboard / download).
+#[tauri::command]
+pub async fn export_graph(state: State<'_, AppState>) -> Result<String, String> {
+    let snapshot = state
+        .graph_snapshot
+        .read()
+        .map_err(|e| format!("Failed to read graph snapshot: {}", e))?;
+    serde_json::to_string_pretty(&*snapshot)
+        .map_err(|e| format!("Failed to serialize graph: {}", e))
+}
+
+/// Get the current session ID.
+#[tauri::command]
+pub async fn get_session_id(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.session_id.clone())
 }

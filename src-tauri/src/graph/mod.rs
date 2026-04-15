@@ -8,7 +8,7 @@ pub mod extraction;
 pub mod temporal;
 
 pub use entities::{
-    ExtractedEntity, ExtractedRelation, ExtractionResult, GraphEntity, GraphLink, GraphNode,
-    GraphRelation, GraphSnapshot, GraphStats,
+    ExtractedEntity, ExtractedRelation, ExtractionResult, GraphDelta, GraphEdge, GraphEntity,
+    GraphLink, GraphNode, GraphRelation, GraphSnapshot, GraphStats,
 };
 pub use temporal::TemporalKnowledgeGraph;

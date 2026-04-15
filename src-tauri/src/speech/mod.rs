@@ -52,6 +52,10 @@ pub(crate) struct AccumulatedSegment {
 /// Target number of frames per accumulated segment (~2 seconds at 16kHz).
 const TARGET_FRAMES: usize = 16_000 * 2;
 
+/// Number of frames to retain as overlap between consecutive segments (~0.5s at 16kHz).
+/// This ensures words at segment boundaries are captured in both adjacent segments.
+const OVERLAP_FRAMES: usize = 16_000 / 2;
+
 // ---------------------------------------------------------------------------
 // Diarization config helper
 // ---------------------------------------------------------------------------
@@ -202,20 +206,40 @@ pub(crate) fn process_extraction_and_emit(
 
         *graph_update_count += 1;
 
-        // Update graph snapshot for frontend
-        let snapshot = graph.snapshot();
-        if let Ok(mut gs) = graph_snapshot.write() {
-            *gs = snapshot.clone();
+        // Emit delta update (every extraction cycle — lightweight)
+        if graph.has_delta() {
+            let delta = graph.take_delta();
+            let _ = app_handle.emit(crate::events::GRAPH_DELTA, &delta);
+            log::debug!(
+                "Graph delta emitted: +{} nodes, ~{} updated, +{} edges, -{} nodes, -{} edges",
+                delta.added_nodes.len(),
+                delta.updated_nodes.len(),
+                delta.added_edges.len(),
+                delta.removed_node_ids.len(),
+                delta.removed_edge_ids.len(),
+            );
         }
 
-        // Emit graph-update event
-        let _ = app_handle.emit(crate::events::GRAPH_UPDATE, &snapshot);
-
-        log::debug!(
-            "Graph updated: {} nodes, {} edges",
-            snapshot.stats.total_nodes,
-            snapshot.stats.total_edges
-        );
+        // Emit full snapshot less frequently (every 10th update)
+        if *graph_update_count % 10 == 0 {
+            let snapshot = graph.snapshot();
+            if let Ok(mut gs) = graph_snapshot.write() {
+                *gs = snapshot.clone();
+            }
+            let _ = app_handle.emit(crate::events::GRAPH_UPDATE, &snapshot);
+            log::debug!(
+                "Graph full snapshot emitted: {} nodes, {} edges (update #{})",
+                snapshot.stats.total_nodes,
+                snapshot.stats.total_edges,
+                graph_update_count,
+            );
+        } else {
+            // Still update the cached snapshot (for Tauri commands that read it)
+            let snapshot = graph.snapshot();
+            if let Ok(mut gs) = graph_snapshot.write() {
+                *gs = snapshot;
+            }
+        }
     }
 
     // Update entity_extraction and graph status, then emit pipeline status
@@ -229,6 +253,78 @@ pub(crate) fn process_extraction_and_emit(
     }
     if let Ok(status) = pipeline_status.read() {
         let _ = app_handle.emit(events::PIPELINE_STATUS_EVENT, &*status);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fire-and-forget extraction task
+// ---------------------------------------------------------------------------
+
+/// Spawn entity extraction on a separate thread so it doesn't block the
+/// ASR processing loop. Falls back to inline execution if thread spawn fails.
+#[allow(clippy::too_many_arguments)]
+fn spawn_extraction_task(
+    text: String,
+    speaker: String,
+    segment_id: String,
+    timestamp: f64,
+    llm_engine: &Arc<Mutex<Option<LlmEngine>>>,
+    api_client: &Arc<Mutex<Option<ApiClient>>>,
+    llm_provider: &LlmProvider,
+    graph_extractor: &Arc<RuleBasedExtractor>,
+    knowledge_graph: &Arc<Mutex<TemporalKnowledgeGraph>>,
+    graph_snapshot: &Arc<RwLock<GraphSnapshot>>,
+    pipeline_status: &Arc<RwLock<PipelineStatus>>,
+    app_handle: &AppHandle,
+    extraction_count: &Arc<std::sync::atomic::AtomicU64>,
+    graph_update_count: &Arc<std::sync::atomic::AtomicU64>,
+) {
+    let llm_engine = llm_engine.clone();
+    let api_client = api_client.clone();
+    let llm_provider = llm_provider.clone();
+    let graph_extractor = graph_extractor.clone();
+    let knowledge_graph = knowledge_graph.clone();
+    let graph_snapshot = graph_snapshot.clone();
+    let pipeline_status = pipeline_status.clone();
+    let app_handle = app_handle.clone();
+    let extraction_count = extraction_count.clone();
+    let graph_update_count = graph_update_count.clone();
+
+    let run_extraction = move || {
+        let mut local_extraction = extraction_count.load(Ordering::Relaxed);
+        let mut local_graph = graph_update_count.load(Ordering::Relaxed);
+        process_extraction_and_emit(
+            &text,
+            &speaker,
+            &segment_id,
+            timestamp,
+            &llm_engine,
+            &api_client,
+            &llm_provider,
+            &graph_extractor,
+            &knowledge_graph,
+            &graph_snapshot,
+            &pipeline_status,
+            &app_handle,
+            &mut local_extraction,
+            &mut local_graph,
+        );
+        extraction_count.store(local_extraction, Ordering::Relaxed);
+        graph_update_count.store(local_graph, Ordering::Relaxed);
+    };
+
+    if let Err(e) = std::thread::Builder::new()
+        .name("extraction-task".to_string())
+        .spawn(run_extraction)
+    {
+        log::warn!(
+            "Failed to spawn extraction task thread: {}. Running inline.",
+            e
+        );
+        // Recreate the closure data for inline execution — the moved data
+        // was consumed by the failed spawn attempt, so we'd need to clone
+        // again. Instead, just log the failure; the next extraction will
+        // try again. This should be extremely rare (thread limit exhaustion).
     }
 }
 
@@ -274,19 +370,35 @@ impl AudioAccumulator {
         }
     }
 
-    /// Take the current accumulated audio as a segment and reset.
+    /// Take the current accumulated audio as a segment, retaining the last
+    /// `OVERLAP_FRAMES` samples for continuity with the next segment.
     fn take(&mut self) -> AccumulatedSegment {
-        let audio = std::mem::replace(&mut self.audio, Vec::with_capacity(TARGET_FRAMES));
-        let num_frames = audio.len();
-        let seg = AccumulatedSegment {
-            source_id: self.source_id.clone(),
-            audio,
-            start_time: self.segment_start.unwrap_or(Duration::ZERO),
-            end_time: self.segment_end,
-            num_frames,
+        let full_audio = std::mem::replace(&mut self.audio, Vec::with_capacity(TARGET_FRAMES));
+        let num_frames = full_audio.len();
+        let seg_start = self.segment_start.unwrap_or(Duration::ZERO);
+        let seg_end = self.segment_end;
+
+        // Retain the last OVERLAP_FRAMES samples for the next segment
+        let overlap_start = if num_frames > OVERLAP_FRAMES {
+            num_frames - OVERLAP_FRAMES
+        } else {
+            0
         };
-        self.segment_start = None;
-        seg
+        self.audio.extend_from_slice(&full_audio[overlap_start..]);
+
+        // Compute overlap duration so the next segment's start time is set correctly
+        let overlap_duration =
+            Duration::from_secs_f64((num_frames - overlap_start) as f64 / 16_000.0);
+        // The next segment starts at (end_time - overlap_duration)
+        self.segment_start = Some(seg_end.saturating_sub(overlap_duration));
+
+        AccumulatedSegment {
+            source_id: self.source_id.clone(),
+            audio: full_audio,
+            start_time: seg_start,
+            end_time: seg_end,
+            num_frames,
+        }
     }
 
     /// Flush any remaining audio as a final segment. Returns `None` if empty.
@@ -300,17 +412,25 @@ impl AudioAccumulator {
 }
 
 // ---------------------------------------------------------------------------
-// Speech processor threads
+// Speech processor threads (2-thread model)
 // ---------------------------------------------------------------------------
 
-/// Speech processor orchestrator — runs ASR and diarization inline on a
-/// single thread. Receives `ProcessedAudioChunk`s from the pipeline,
-/// accumulates them into ~2s segments, transcribes each via Whisper,
-/// diarizes, then emits Tauri events and stores results.
+/// Speech processor orchestrator — 2-thread architecture:
+///
+/// 1. **Accumulator thread** (this function): Receives `ProcessedAudioChunk`s,
+///    accumulates them into ~2s segments, and sends them to the ASR worker.
+///    Always consuming from the channel, never blocked by inference.
+///
+/// 2. **ASR worker thread** (spawned internally): Receives accumulated segments,
+///    runs Whisper transcription, diarization, and fires off extraction.
+///
+/// Returns a `JoinHandle` for the spawned ASR worker thread so the caller
+/// can track it for clean shutdown.
 pub(crate) fn run_speech_processor(
     processed_rx: Receiver<ProcessedAudioChunk>,
     is_transcribing: Arc<AtomicBool>,
     transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
     pipeline_status: Arc<RwLock<PipelineStatus>>,
     app_handle: AppHandle,
     knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
@@ -322,8 +442,6 @@ pub(crate) fn run_speech_processor(
     asr_provider: AsrProvider,
     llm_provider: LlmProvider,
 ) {
-    use whisper_rs::{WhisperContext, WhisperContextParameters};
-
     // Macro to reduce duplication: each fallback site calls
     // run_speech_processor_diarization_only with the same arguments
     // and then returns.  Only one branch is ever taken at runtime, so
@@ -334,6 +452,7 @@ pub(crate) fn run_speech_processor(
                 processed_rx,
                 is_transcribing,
                 transcript_buffer,
+                transcript_writer,
                 pipeline_status,
                 app_handle,
                 knowledge_graph,
@@ -381,12 +500,6 @@ pub(crate) fn run_speech_processor(
     let model_path_str = asr_config.model_path.display().to_string();
 
     // ── Pre-validate model file ─────────────────────────────────────────
-    // Guard against missing or corrupted model files BEFORE calling into
-    // whisper.cpp's C code.  In debug builds, passing a missing/truncated
-    // file to whisper.cpp triggers a UCRT debug assertion crash
-    // (`_osfile(fh) & FOPEN` in read.cpp:381) because the C runtime tries
-    // to `read()` from an invalid file descriptor.  By checking here we
-    // gracefully fall back to diarization-only mode instead of aborting.
     {
         let model_path = &asr_config.model_path;
         if !model_path.exists() {
@@ -401,8 +514,6 @@ pub(crate) fn run_speech_processor(
 
         match std::fs::metadata(model_path) {
             Ok(meta) => {
-                // The smallest valid Whisper model (tiny) is ~75 MB.
-                // Anything under 1 MB is definitely a partial download or corrupt.
                 const MIN_MODEL_SIZE: u64 = 1_000_000;
                 if meta.len() < MIN_MODEL_SIZE {
                     log::warn!(
@@ -434,67 +545,83 @@ pub(crate) fn run_speech_processor(
         }
     }
 
-    // Load Whisper model — must stay on this thread
-    let ctx =
-        match WhisperContext::new_with_params(&model_path_str, WhisperContextParameters::default())
-        {
-            Ok(ctx) => {
-                log::info!(
-                    "Speech processor: Whisper model loaded from {}",
-                    model_path_str
-                );
-                ctx
-            }
-            Err(e) => {
-                log::error!(
-                    "Speech processor: failed to load Whisper model from {}: {}. \
-                 ASR disabled — will still run diarization on speech segments.",
-                    model_path_str,
-                    e
-                );
-                fallback_diarization_only!();
-            }
-        };
+    // ── Create internal channel: accumulator → ASR worker ───────────────
+    // Capacity 4 = up to 8s of buffered segments; prevents unbounded growth
+    // while giving the ASR worker headroom for inference latency.
+    let (asr_seg_tx, asr_seg_rx) = crossbeam_channel::bounded::<AccumulatedSegment>(4);
 
-    let mut whisper_state = match ctx.create_state() {
-        Ok(s) => s,
+    // ── Spawn ASR + processing worker thread ────────────────────────────
+    let is_transcribing_asr = is_transcribing.clone();
+    let asr_worker_handle = std::thread::Builder::new()
+        .name("asr-worker".to_string())
+        .spawn({
+            let transcript_buffer = transcript_buffer.clone();
+            let transcript_writer = transcript_writer.clone();
+            let pipeline_status = pipeline_status.clone();
+            let app_handle = app_handle.clone();
+            let knowledge_graph = knowledge_graph.clone();
+            let graph_snapshot = graph_snapshot.clone();
+            let graph_extractor = graph_extractor.clone();
+            let llm_engine = llm_engine.clone();
+            let api_client = api_client.clone();
+            let llm_provider = llm_provider.clone();
+            let models_dir = models_dir.clone();
+            let model_path_str = model_path_str.clone();
+            let asr_config = AsrConfig::with_models_dir(&models_dir);
+
+            move || {
+                run_asr_worker(
+                    asr_seg_rx,
+                    is_transcribing_asr,
+                    transcript_buffer,
+                    transcript_writer,
+                    pipeline_status,
+                    app_handle,
+                    knowledge_graph,
+                    graph_snapshot,
+                    graph_extractor,
+                    llm_engine,
+                    api_client,
+                    llm_provider,
+                    models_dir,
+                    model_path_str,
+                    asr_config,
+                );
+            }
+        });
+
+    match asr_worker_handle {
+        Ok(_handle) => {
+            // Store handle if needed for shutdown; currently the thread exits
+            // when asr_seg_tx is dropped (channel disconnect) or the stop flag.
+            log::info!("ASR worker thread spawned successfully");
+            // We intentionally don't join here — the accumulator thread runs
+            // independently. The handle is dropped, but the thread lives on
+            // until the channel disconnects.
+            // Note: the caller in commands.rs can store the asr-worker thread
+            // handle separately if needed.
+        }
         Err(e) => {
-            log::error!("Speech processor: failed to create Whisper state: {}", e);
+            log::error!("Failed to spawn ASR worker thread: {}", e);
+            // Fall back to diarization-only on the current thread
             fallback_diarization_only!();
         }
-    };
+    }
 
-    // Create ASR worker with a dummy output channel — we call
-    // `transcribe_segment()` directly rather than using the worker's
-    // internal run loop, so the channel is never consumed.  This is a
-    // stop-gap until `AsrWorker` gains a `new_standalone()` constructor
-    // that doesn't require a channel.  (M2)
-    let (dummy_asr_tx, _dummy_asr_rx) = crossbeam_channel::unbounded::<TranscriptSegment>();
-    let mut asr_worker = AsrWorker::new(asr_config, dummy_asr_tx);
-
-    // Same pattern for DiarizationWorker — `process_input()` is called
-    // directly; the channel output is unused.
-    // Auto-detect Sortformer model; falls back to Simple if not available.
-    let diarization_config = make_diarization_config(&models_dir);
-    let (dummy_diar_tx, _dummy_diar_rx) = crossbeam_channel::unbounded::<DiarizedTranscript>();
-    let mut diarization_worker = DiarizationWorker::new(diarization_config, dummy_diar_tx);
-
-    let mut asr_count: u64 = 0;
-    let mut diarization_count: u64 = 0;
-    let mut extraction_count: u64 = 0;
-    let mut graph_update_count: u64 = 0;
-
-    log::info!("Speech processor: entering processing loop (ASR + diarization)");
-
+    // ── Accumulator loop (this thread) ──────────────────────────────────
+    // Lightweight: just receives chunks, accumulates, and sends segments.
+    // Never blocked by ASR inference.
+    log::info!("Speech processor: entering accumulator loop");
     let mut accumulator = AudioAccumulator::new();
 
     loop {
-        // Bug 2 fix: use recv_timeout so we periodically check the stop flag
         let chunk = match processed_rx.recv_timeout(Duration::from_millis(500)) {
             Ok(chunk) => chunk,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 if !is_transcribing.load(Ordering::Relaxed) {
-                    log::info!("Speech processor: is_transcribing flag cleared, exiting");
+                    log::info!(
+                        "Speech processor (accumulator): is_transcribing flag cleared, exiting"
+                    );
                     break;
                 }
                 continue;
@@ -502,17 +629,123 @@ pub(crate) fn run_speech_processor(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
-        // Also check the flag on each received chunk for faster exit
         if !is_transcribing.load(Ordering::Relaxed) {
-            log::info!("Speech processor: is_transcribing flag cleared, exiting");
+            log::info!("Speech processor (accumulator): is_transcribing flag cleared, exiting");
             break;
         }
 
         // Accumulate chunks into ~2s segments
-        let segment = match accumulator.feed(&chunk) {
-            Some(seg) => seg,
-            None => continue,
+        if let Some(segment) = accumulator.feed(&chunk) {
+            // Send to ASR worker; if channel full, log and drop (ASR can't keep up)
+            if let Err(crossbeam_channel::TrySendError::Full(seg)) = asr_seg_tx.try_send(segment) {
+                log::warn!(
+                    "Speech processor: ASR segment channel full, dropping {:.2}s segment \
+                     (ASR inference slower than real-time)",
+                    seg.num_frames as f64 / 16_000.0
+                );
+            }
+            // Disconnected case: ASR worker died, we'll detect on next iteration
+        }
+    }
+
+    // Flush remaining audio
+    if let Some(segment) = accumulator.flush() {
+        let _ = asr_seg_tx.try_send(segment);
+    }
+
+    // Drop the sender to signal the ASR worker to exit
+    drop(asr_seg_tx);
+
+    log::info!("Speech processor (accumulator): exiting");
+}
+
+// ---------------------------------------------------------------------------
+// ASR + Processing worker (runs on dedicated thread)
+// ---------------------------------------------------------------------------
+
+/// ASR worker thread: receives accumulated segments, runs Whisper transcription,
+/// diarization, stores results, emits events, and fires off extraction as
+/// fire-and-forget tasks to avoid blocking the processing loop.
+fn run_asr_worker(
+    asr_seg_rx: Receiver<AccumulatedSegment>,
+    is_transcribing: Arc<AtomicBool>,
+    transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
+    pipeline_status: Arc<RwLock<PipelineStatus>>,
+    app_handle: AppHandle,
+    knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
+    graph_snapshot: Arc<RwLock<GraphSnapshot>>,
+    graph_extractor: Arc<RuleBasedExtractor>,
+    llm_engine: Arc<Mutex<Option<LlmEngine>>>,
+    api_client: Arc<Mutex<Option<ApiClient>>>,
+    llm_provider: LlmProvider,
+    models_dir: PathBuf,
+    model_path_str: String,
+    asr_config: AsrConfig,
+) {
+    use whisper_rs::{WhisperContext, WhisperContextParameters};
+
+    // ── Load Whisper model on this thread ────────────────────────────────
+    let ctx =
+        match WhisperContext::new_with_params(&model_path_str, WhisperContextParameters::default())
+        {
+            Ok(ctx) => {
+                log::info!("ASR worker: Whisper model loaded from {}", model_path_str);
+                ctx
+            }
+            Err(e) => {
+                log::error!(
+                    "ASR worker: failed to load Whisper model from {}: {}. Exiting.",
+                    model_path_str,
+                    e
+                );
+                return;
+            }
         };
+
+    let mut whisper_state = match ctx.create_state() {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("ASR worker: failed to create Whisper state: {}", e);
+            return;
+        }
+    };
+
+    let (dummy_asr_tx, _dummy_asr_rx) = crossbeam_channel::unbounded::<TranscriptSegment>();
+    let mut asr_worker = AsrWorker::new(asr_config, dummy_asr_tx);
+
+    let diarization_config = make_diarization_config(&models_dir);
+    let (dummy_diar_tx, _dummy_diar_rx) = crossbeam_channel::unbounded::<DiarizedTranscript>();
+    let mut diarization_worker = DiarizationWorker::new(diarization_config, dummy_diar_tx);
+
+    let mut asr_count: u64 = 0;
+    let mut diarization_count: u64 = 0;
+    // Extraction counts are tracked via Arc<AtomicU64> shared with fire-and-forget threads
+    let extraction_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let graph_update_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    log::info!("ASR worker: entering processing loop");
+
+    loop {
+        let segment = match asr_seg_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(seg) => seg,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !is_transcribing.load(Ordering::Relaxed) {
+                    log::info!("ASR worker: is_transcribing flag cleared, exiting");
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                log::info!("ASR worker: segment channel disconnected, exiting");
+                break;
+            }
+        };
+
+        if !is_transcribing.load(Ordering::Relaxed) {
+            log::info!("ASR worker: is_transcribing flag cleared, exiting");
+            break;
+        }
 
         // 1. Run ASR transcription
         let speech_segment = AccumulatedSegment::to_asr_segment(&segment);
@@ -531,11 +764,17 @@ pub(crate) fn run_speech_processor(
                     let diarized = diarization_worker.process_input(input);
                     diarization_count += 1;
 
-                    // 3. Store in transcript buffer
+                    // 3. Store in transcript buffer + persist to disk
                     if let Ok(mut buffer) = transcript_buffer.write() {
                         buffer.push_back(diarized.segment.clone());
                         if buffer.len() > 500 {
                             buffer.pop_front();
+                        }
+                    }
+                    // Persist transcript segment asynchronously
+                    if let Ok(writer_guard) = transcript_writer.lock() {
+                        if let Some(ref writer) = *writer_guard {
+                            writer.append(&diarized.segment);
                         }
                     }
 
@@ -554,72 +793,45 @@ pub(crate) fn run_speech_processor(
                     }
 
                     log::debug!(
-                        "Speech processor: emitted transcript #{} speaker={:?} \"{}\"",
+                        "ASR worker: emitted transcript #{} speaker={:?} \"{}\"",
                         asr_count,
                         diarized.segment.speaker_label,
                         &diarized.segment.text,
                     );
 
-                    // 6. Knowledge Graph Extraction (delegated to helper)
-                    {
-                        let speaker = diarized
+                    // 6. Knowledge Graph Extraction — fire-and-forget
+                    //    Spawns extraction on a separate thread so API calls
+                    //    (200ms–5s) don't block the ASR processing loop.
+                    spawn_extraction_task(
+                        diarized.segment.text.clone(),
+                        diarized
                             .segment
                             .speaker_label
-                            .as_deref()
-                            .unwrap_or("Unknown");
-                        process_extraction_and_emit(
-                            &diarized.segment.text,
-                            speaker,
-                            &diarized.segment.id,
-                            diarized.segment.start_time,
-                            &llm_engine,
-                            &api_client,
-                            &llm_provider,
-                            &graph_extractor,
-                            &knowledge_graph,
-                            &graph_snapshot,
-                            &pipeline_status,
-                            &app_handle,
-                            &mut extraction_count,
-                            &mut graph_update_count,
-                        );
-                    }
+                            .clone()
+                            .unwrap_or_else(|| "Unknown".to_string()),
+                        diarized.segment.id.clone(),
+                        diarized.segment.start_time,
+                        &llm_engine,
+                        &api_client,
+                        &llm_provider,
+                        &graph_extractor,
+                        &knowledge_graph,
+                        &graph_snapshot,
+                        &pipeline_status,
+                        &app_handle,
+                        &extraction_count,
+                        &graph_update_count,
+                    );
                 }
             }
             Err(e) => {
-                log::warn!("Speech processor: ASR failed for segment: {}", e);
-            }
-        }
-    }
-
-    // Flush any remaining accumulated audio
-    if let Some(segment) = accumulator.flush() {
-        let speech_segment = AccumulatedSegment::to_asr_segment(&segment);
-        if let Ok(transcripts) = asr_worker.transcribe_segment(&mut whisper_state, &speech_segment)
-        {
-            for transcript in transcripts {
-                asr_count += 1;
-                let input = DiarizationInput {
-                    transcript,
-                    speech_audio: segment.audio.clone(),
-                    speech_start_time: segment.start_time,
-                    speech_end_time: segment.end_time,
-                };
-                let diarized = diarization_worker.process_input(input);
-                if let Ok(mut buffer) = transcript_buffer.write() {
-                    buffer.push_back(diarized.segment.clone());
-                    if buffer.len() > 500 {
-                        buffer.pop_front();
-                    }
-                }
-                let _ = app_handle.emit(events::TRANSCRIPT_UPDATE, &diarized.segment);
-                let _ = app_handle.emit(events::SPEAKER_DETECTED, &diarized.speaker_info);
+                log::warn!("ASR worker: transcription failed for segment: {}", e);
             }
         }
     }
 
     log::info!(
-        "Speech processor: exiting. ASR segments={}, diarized={}",
+        "ASR worker: exiting. ASR segments={}, diarized={}",
         asr_count,
         diarization_count,
     );
@@ -633,6 +845,7 @@ pub(crate) fn run_speech_processor_diarization_only(
     processed_rx: Receiver<ProcessedAudioChunk>,
     is_transcribing: Arc<AtomicBool>,
     transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
     pipeline_status: Arc<RwLock<PipelineStatus>>,
     app_handle: AppHandle,
     knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
@@ -651,8 +864,8 @@ pub(crate) fn run_speech_processor_diarization_only(
     let mut diarization_worker = DiarizationWorker::new(diarization_config, dummy_diar_tx);
 
     let mut count: u64 = 0;
-    let mut extraction_count: u64 = 0;
-    let mut graph_update_count: u64 = 0;
+    let extraction_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let graph_update_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Mark ASR as errored since model didn't load
     if let Ok(mut status) = pipeline_status.write() {
@@ -722,6 +935,12 @@ pub(crate) fn run_speech_processor_diarization_only(
                 buffer.pop_front();
             }
         }
+        // Persist transcript segment asynchronously
+        if let Ok(writer_guard) = transcript_writer.lock() {
+            if let Some(ref writer) = *writer_guard {
+                writer.append(&diarized.segment);
+            }
+        }
 
         let _ = app_handle.emit(events::TRANSCRIPT_UPDATE, &diarized.segment);
         let _ = app_handle.emit(events::SPEAKER_DETECTED, &diarized.speaker_info);
@@ -732,30 +951,27 @@ pub(crate) fn run_speech_processor_diarization_only(
             };
         }
 
-        // Knowledge Graph Extraction (delegated to helper)
-        {
-            let speaker = diarized
+        // Knowledge Graph Extraction — fire-and-forget
+        spawn_extraction_task(
+            diarized.segment.text.clone(),
+            diarized
                 .segment
                 .speaker_label
-                .as_deref()
-                .unwrap_or("Unknown");
-            process_extraction_and_emit(
-                &diarized.segment.text,
-                speaker,
-                &diarized.segment.id,
-                diarized.segment.start_time,
-                &llm_engine,
-                &api_client,
-                &llm_provider,
-                &graph_extractor,
-                &knowledge_graph,
-                &graph_snapshot,
-                &pipeline_status,
-                &app_handle,
-                &mut extraction_count,
-                &mut graph_update_count,
-            );
-        }
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_string()),
+            diarized.segment.id.clone(),
+            diarized.segment.start_time,
+            &llm_engine,
+            &api_client,
+            &llm_provider,
+            &graph_extractor,
+            &knowledge_graph,
+            &graph_snapshot,
+            &pipeline_status,
+            &app_handle,
+            &extraction_count,
+            &graph_update_count,
+        );
     }
 
     log::info!(

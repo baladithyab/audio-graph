@@ -6,15 +6,17 @@
 
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 use petgraph::visit::EdgeRef;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 use super::entities::{
     entity_type_color, relation_type_color, ExtractedEntity, ExtractedRelation, ExtractionResult,
-    GraphEntity, GraphLink, GraphNode, GraphSnapshot, GraphStats,
+    GraphDelta, GraphEdge, GraphEntity, GraphLink, GraphNode, GraphSnapshot, GraphStats,
 };
 
 /// Edge data in the temporal graph.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemporalEdge {
     pub relation_type: String,
     pub valid_from: f64,
@@ -40,6 +42,34 @@ pub struct TemporalKnowledgeGraph {
     name_index: HashMap<String, NodeIndex>,
     /// Event counter for generating unique IDs.
     event_counter: u64,
+
+    // -- Delta tracking state --------------------------------------------------
+    /// IDs of nodes added since the last `take_delta()` call.
+    delta_added_node_ids: Vec<String>,
+    /// IDs of nodes updated (but not newly added) since the last `take_delta()`.
+    delta_updated_node_ids: Vec<String>,
+    /// (source_idx, target_idx, edge_idx) of edges added since last delta.
+    delta_added_edge_indices: Vec<petgraph::graph::EdgeIndex>,
+    /// IDs of removed (evicted) nodes since last delta.
+    delta_removed_node_ids: Vec<String>,
+    /// Synthetic IDs for removed (evicted) edges since last delta.
+    delta_removed_edge_ids: Vec<String>,
+}
+
+/// Serializable representation of the graph for save/load.
+#[derive(Serialize, Deserialize)]
+struct SerializableGraph {
+    nodes: Vec<GraphEntity>,
+    edges: Vec<SerializableEdge>,
+    event_counter: u64,
+}
+
+/// Serializable edge with source/target names.
+#[derive(Serialize, Deserialize)]
+struct SerializableEdge {
+    source_name: String,
+    target_name: String,
+    edge: TemporalEdge,
 }
 
 impl TemporalKnowledgeGraph {
@@ -49,6 +79,11 @@ impl TemporalKnowledgeGraph {
             graph: StableGraph::new(),
             name_index: HashMap::new(),
             event_counter: 0,
+            delta_added_node_ids: Vec::new(),
+            delta_updated_node_ids: Vec::new(),
+            delta_added_edge_indices: Vec::new(),
+            delta_removed_node_ids: Vec::new(),
+            delta_removed_edge_ids: Vec::new(),
         }
     }
 
@@ -89,11 +124,19 @@ impl TemporalKnowledgeGraph {
                 if entity.description.is_some() && node.description.is_none() {
                     node.description = entity.description.clone();
                 }
+                // Track as updated (if not already tracked as newly added)
+                if !self.delta_added_node_ids.contains(&node.id) {
+                    let id = node.id.clone();
+                    if !self.delta_updated_node_ids.contains(&id) {
+                        self.delta_updated_node_ids.push(id);
+                    }
+                }
             }
             idx
         } else {
             // Create new entity
             let id = uuid::Uuid::new_v4().to_string();
+            self.delta_added_node_ids.push(id.clone());
             let node = GraphEntity {
                 id,
                 name: entity.name.clone(),
@@ -162,7 +205,8 @@ impl TemporalKnowledgeGraph {
                 detail: relation.detail.clone(),
                 weight: 1.0,
             };
-            self.graph.add_edge(source_idx, target_idx, edge);
+            let edge_idx = self.graph.add_edge(source_idx, target_idx, edge);
+            self.delta_added_edge_indices.push(edge_idx);
         }
     }
 
@@ -259,6 +303,11 @@ impl TemporalKnowledgeGraph {
                 if let Some(entity) = self.graph.node_weight(idx) {
                     let key = entity.name.to_lowercase();
                     self.name_index.remove(&key);
+                    // Track removal in delta
+                    self.delta_removed_node_ids.push(entity.id.clone());
+                    // Remove from added/updated lists if present
+                    self.delta_added_node_ids.retain(|id| id != &entity.id);
+                    self.delta_updated_node_ids.retain(|id| id != &entity.id);
                     log::debug!(
                         "Graph eviction: removed oldest node '{}' (last_seen={:.1})",
                         entity.name,
@@ -291,6 +340,11 @@ impl TemporalKnowledgeGraph {
             });
 
             if let Some(idx) = oldest {
+                // Track removal in delta with a synthetic ID
+                let edge_id = format!("edge-evicted-{:?}", idx);
+                self.delta_removed_edge_ids.push(edge_id);
+                // Remove from added list if present
+                self.delta_added_edge_indices.retain(|&ei| ei != idx);
                 log::debug!("Graph eviction: removed oldest edge (idx={:?})", idx);
                 self.graph.remove_edge(idx);
             } else {
@@ -358,6 +412,202 @@ impl TemporalKnowledgeGraph {
             nodes,
             links,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Delta tracking
+    // -----------------------------------------------------------------------
+
+    /// Returns `true` if there are any accumulated changes since the last
+    /// `take_delta()` call.
+    pub fn has_delta(&self) -> bool {
+        !self.delta_added_node_ids.is_empty()
+            || !self.delta_updated_node_ids.is_empty()
+            || !self.delta_added_edge_indices.is_empty()
+            || !self.delta_removed_node_ids.is_empty()
+            || !self.delta_removed_edge_ids.is_empty()
+    }
+
+    /// Take the accumulated delta since the last call, resetting the internal
+    /// delta buffers. Returns a [`GraphDelta`] with the changes.
+    pub fn take_delta(&mut self) -> GraphDelta {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+
+        // Collect added nodes
+        let added_nodes: Vec<GraphNode> = self
+            .delta_added_node_ids
+            .drain(..)
+            .filter_map(|id| {
+                self.graph.node_indices().find_map(|idx| {
+                    let entity = self.graph.node_weight(idx)?;
+                    if entity.id == id {
+                        Some(GraphNode {
+                            id: entity.id.clone(),
+                            name: entity.name.clone(),
+                            entity_type: entity.entity_type.clone(),
+                            val: (entity.mention_count as f32).sqrt() * 2.0 + 1.0,
+                            color: entity_type_color(&entity.entity_type).to_string(),
+                            first_seen: entity.first_seen,
+                            last_seen: entity.last_seen,
+                            mention_count: entity.mention_count,
+                            description: entity.description.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        // Collect updated nodes
+        let updated_nodes: Vec<GraphNode> = self
+            .delta_updated_node_ids
+            .drain(..)
+            .filter_map(|id| {
+                self.graph.node_indices().find_map(|idx| {
+                    let entity = self.graph.node_weight(idx)?;
+                    if entity.id == id {
+                        Some(GraphNode {
+                            id: entity.id.clone(),
+                            name: entity.name.clone(),
+                            entity_type: entity.entity_type.clone(),
+                            val: (entity.mention_count as f32).sqrt() * 2.0 + 1.0,
+                            color: entity_type_color(&entity.entity_type).to_string(),
+                            first_seen: entity.first_seen,
+                            last_seen: entity.last_seen,
+                            mention_count: entity.mention_count,
+                            description: entity.description.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        // Collect added edges
+        let added_edges: Vec<GraphEdge> = self
+            .delta_added_edge_indices
+            .drain(..)
+            .filter_map(|edge_idx| {
+                let (source_idx, target_idx) = self.graph.edge_endpoints(edge_idx)?;
+                let edge = self.graph.edge_weight(edge_idx)?;
+                let source_node = self.graph.node_weight(source_idx)?;
+                let target_node = self.graph.node_weight(target_idx)?;
+
+                // Skip expired edges
+                if edge.valid_until.is_some() {
+                    return None;
+                }
+
+                Some(GraphEdge {
+                    id: format!("edge-{:?}", edge_idx),
+                    source: source_node.id.clone(),
+                    target: target_node.id.clone(),
+                    relation_type: edge.relation_type.clone(),
+                    weight: edge.weight,
+                    color: relation_type_color(&edge.relation_type).to_string(),
+                    label: edge
+                        .detail
+                        .clone()
+                        .or_else(|| Some(edge.relation_type.clone())),
+                })
+            })
+            .collect();
+
+        let removed_node_ids: Vec<String> = self.delta_removed_node_ids.drain(..).collect();
+        let removed_edge_ids: Vec<String> = self.delta_removed_edge_ids.drain(..).collect();
+
+        GraphDelta {
+            added_nodes,
+            updated_nodes,
+            added_edges,
+            removed_node_ids,
+            removed_edge_ids,
+            timestamp,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Persistence (save / load)
+    // -----------------------------------------------------------------------
+
+    /// Serialize the graph to a JSON file.
+    pub fn save_to_file(&self, path: &Path) -> Result<(), String> {
+        let nodes: Vec<GraphEntity> = self
+            .graph
+            .node_indices()
+            .filter_map(|idx| self.graph.node_weight(idx).cloned())
+            .collect();
+
+        let edges: Vec<SerializableEdge> = self
+            .graph
+            .edge_indices()
+            .filter_map(|idx| {
+                let (src, tgt) = self.graph.edge_endpoints(idx)?;
+                let edge = self.graph.edge_weight(idx)?.clone();
+                let source_name = self.graph.node_weight(src)?.name.clone();
+                let target_name = self.graph.node_weight(tgt)?.name.clone();
+                Some(SerializableEdge {
+                    source_name,
+                    target_name,
+                    edge,
+                })
+            })
+            .collect();
+
+        let data = SerializableGraph {
+            nodes,
+            edges,
+            event_counter: self.event_counter,
+        };
+
+        crate::persistence::save_json(&data, path)
+    }
+
+    /// Deserialize a graph from a JSON file.
+    pub fn load_from_file(path: &Path) -> Result<Self, String> {
+        let data: SerializableGraph = crate::persistence::load_json(path)?;
+
+        let mut graph = StableGraph::new();
+        let mut name_index = HashMap::new();
+
+        // Re-create nodes
+        for entity in &data.nodes {
+            let idx = graph.add_node(entity.clone());
+            name_index.insert(entity.name.to_lowercase(), idx);
+        }
+
+        // Re-create edges
+        for se in &data.edges {
+            let src_key = se.source_name.to_lowercase();
+            let tgt_key = se.target_name.to_lowercase();
+            if let (Some(&src_idx), Some(&tgt_idx)) =
+                (name_index.get(&src_key), name_index.get(&tgt_key))
+            {
+                graph.add_edge(src_idx, tgt_idx, se.edge.clone());
+            } else {
+                log::warn!(
+                    "Graph load: skipping edge '{}' → '{}' (missing node)",
+                    se.source_name,
+                    se.target_name
+                );
+            }
+        }
+
+        Ok(Self {
+            graph,
+            name_index,
+            event_counter: data.event_counter,
+            delta_added_node_ids: Vec::new(),
+            delta_updated_node_ids: Vec::new(),
+            delta_added_edge_indices: Vec::new(),
+            delta_removed_node_ids: Vec::new(),
+            delta_removed_edge_ids: Vec::new(),
+        })
     }
 }
 

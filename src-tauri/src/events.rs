@@ -6,8 +6,13 @@
 /// Event emitted when a new transcript segment is available.
 pub const TRANSCRIPT_UPDATE: &str = "transcript-update";
 
-/// Event emitted when the knowledge graph changes.
+/// Event emitted when the knowledge graph changes (full snapshot).
+/// Emitted less frequently (every 10th update or every 30 seconds).
 pub const GRAPH_UPDATE: &str = "graph-update";
+
+/// Event emitted with incremental graph changes (delta updates).
+/// Emitted on every extraction cycle for efficient frontend updates.
+pub const GRAPH_DELTA: &str = "graph-delta";
 
 /// Event emitted periodically (every ~2s) or on status change.
 pub const PIPELINE_STATUS_EVENT: &str = "pipeline-status";

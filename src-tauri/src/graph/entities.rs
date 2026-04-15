@@ -100,6 +100,47 @@ pub struct GraphSnapshot {
     pub stats: GraphStats,
 }
 
+/// Delta update for the knowledge graph (incremental changes since last delta).
+///
+/// Emitted via the `GRAPH_DELTA` event to avoid sending the full snapshot on
+/// every extraction cycle. The frontend can apply these deltas to its local
+/// graph state for efficient updates.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct GraphDelta {
+    /// Nodes added since the last delta.
+    pub added_nodes: Vec<GraphNode>,
+    /// Nodes that were updated (e.g. mention_count changed) since the last delta.
+    pub updated_nodes: Vec<GraphNode>,
+    /// Edges added since the last delta.
+    pub added_edges: Vec<GraphEdge>,
+    /// IDs of nodes removed (evicted) since the last delta.
+    pub removed_node_ids: Vec<String>,
+    /// IDs of edges removed (evicted) since the last delta.
+    pub removed_edge_ids: Vec<String>,
+    /// Timestamp of this delta.
+    pub timestamp: f64,
+}
+
+/// A single edge in delta format, carrying source/target node IDs for the
+/// frontend to create links.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphEdge {
+    /// Unique edge identifier.
+    pub id: String,
+    /// Source node ID.
+    pub source: String,
+    /// Target node ID.
+    pub target: String,
+    /// Relationship type.
+    pub relation_type: String,
+    /// Edge weight (strength).
+    pub weight: f32,
+    /// Display color.
+    pub color: String,
+    /// Optional label.
+    pub label: Option<String>,
+}
+
 /// Result of entity extraction from a transcript segment (from native LLM or rule-based).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractionResult {
