@@ -25,22 +25,18 @@ vulkan = [
 # Streaming speaker diarization (Sortformer ONNX via parakeet-rs).
 diarization = ["dep:parakeet-rs"]
 
-# Audio capture (rsac library from GitHub)
-# Platform-conditional: each OS pulls in only its own backend feature.
+# Audio capture (rsac library)
+# Uses path dep for local development (rsac is the parent repo).
+# For standalone builds, switch to the git dep:
+#   rsac = { git = "https://github.com/Codeseys-Labs/rust-crossplat-audio-capture.git", tag = "v0.1.0", features = [...] }
 [target.'cfg(target_os = "linux")'.dependencies]
-rsac = { git = "https://github.com/Codeseys-Labs/rust-crossplat-audio-capture.git", features = [
-    "feat_linux",
-], branch = "master" }
+rsac = { path = "../../../", features = ["feat_linux"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-rsac = { git = "https://github.com/Codeseys-Labs/rust-crossplat-audio-capture.git", features = [
-    "feat_windows",
-], branch = "master" }
+rsac = { path = "../../../", features = ["feat_windows"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-rsac = { git = "https://github.com/Codeseys-Labs/rust-crossplat-audio-capture.git", features = [
-    "feat_macos",
-], branch = "master" }
+rsac = { path = "../../../", features = ["feat_macos"] }
 # Enable Metal GPU acceleration on macOS for Whisper ASR and llama.cpp LLM inference.
 # Both crates detect Apple Metal via their build.rs, but the feature flag must be
 # opted-in explicitly to link the Metal framework and compile the GPU kernels.
