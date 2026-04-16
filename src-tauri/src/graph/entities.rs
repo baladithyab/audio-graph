@@ -2,6 +2,7 @@
 //!
 //! These types are serialized to JSON and sent to the frontend.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// A node in the knowledge graph representing a named entity.
@@ -142,14 +143,14 @@ pub struct GraphEdge {
 }
 
 /// Result of entity extraction from a transcript segment (from native LLM or rule-based).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExtractionResult {
     pub entities: Vec<ExtractedEntity>,
     pub relations: Vec<ExtractedRelation>,
 }
 
 /// A raw entity extracted from text (before resolution).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExtractedEntity {
     pub name: String,
     /// Entity type: "Person", "Organization", "Location", "Event", "Topic", "Product".
@@ -159,7 +160,7 @@ pub struct ExtractedEntity {
 }
 
 /// A raw relation extracted from text (before graph insertion).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExtractedRelation {
     pub source: String,
     pub target: String,

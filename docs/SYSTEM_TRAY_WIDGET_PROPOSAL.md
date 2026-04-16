@@ -615,12 +615,12 @@ The widget window needs its own capabilities entry since it's a separate window 
 
 ```mermaid
 flowchart TD
-    A1[Add tray-icon:default to capabilities] --> A2[Add .setup closure to lib.rs]
-    A2 --> A3[Build TrayIconBuilder with menu]
-    A3 --> A4[Handle left-click: show/hide window]
-    A4 --> A5[Handle menu events: Show, Toggle Capture, Quit]
-    A5 --> A6[Create tray icon PNG asset]
-    A6 --> A7[Test on all platforms]
+    A1["Add tray-icon:default to capabilities"] --> A2["Add .setup closure to lib.rs"]
+    A2 --> A3["Build TrayIconBuilder with menu"]
+    A3 --> A4["Handle left-click: show/hide window"]
+    A4 --> A5["Handle menu events: Show, Toggle Capture, Quit"]
+    A5 --> A6["Create tray icon PNG asset"]
+    A6 --> A7["Test on all platforms"]
 ```
 
 **Steps:**
@@ -636,12 +636,12 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    B1[Create FloatingWidget React component] --> B2[Add widget CSS styles]
-    B2 --> B3[Add window label detection in App.tsx]
-    B3 --> B4[Add create_widget_window fn in Rust]
-    B4 --> B5[Add widget toggle to tray menu]
-    B5 --> B6[Wire inter-window events]
-    B6 --> B7[Test widget lifecycle]
+    B1["Create FloatingWidget React component"] --> B2["Add widget CSS styles"]
+    B2 --> B3["Add window label detection in App.tsx"]
+    B3 --> B4["Add create_widget_window fn in Rust"]
+    B4 --> B5["Add widget toggle to tray menu"]
+    B5 --> B6["Wire inter-window events"]
+    B6 --> B7["Test widget lifecycle"]
 ```
 
 **Steps:**

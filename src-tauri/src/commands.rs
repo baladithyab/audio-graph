@@ -308,6 +308,7 @@ pub async fn start_transcribe(
             let graph_extractor = state.graph_extractor.clone();
             let llm_engine = state.llm_engine.clone();
             let api_client = state.api_client.clone();
+            let mistralrs_engine = state.mistralrs_engine.clone();
 
             let models_dir = crate::models::get_models_dir(&app);
 
@@ -316,6 +317,12 @@ pub async fn start_transcribe(
                 .read()
                 .map(|s| s.asr_provider.clone())
                 .unwrap_or_default();
+
+            let whisper_model = state
+                .app_settings
+                .read()
+                .map(|s| s.whisper_model.clone())
+                .unwrap_or_else(|_| "ggml-small.en.bin".to_string());
 
             let llm_provider = state
                 .app_settings
@@ -419,9 +426,11 @@ pub async fn start_transcribe(
                         graph_extractor,
                         llm_engine,
                         api_client,
+                        mistralrs_engine,
                         models_dir,
                         asr_provider,
                         llm_provider,
+                        whisper_model,
                     );
                 })
                 .map_err(|e| format!("Failed to spawn speech processor thread: {}", e))?;
@@ -946,15 +955,29 @@ pub async fn start_gemini(
         .map(|s| s.gemini.clone())
         .unwrap_or_default();
 
-    if gemini_settings.api_key.is_empty() {
-        return Err(
-            "Gemini API key is not configured. Set it in Settings → Gemini.".to_string(),
-        );
+    // Validate auth configuration early.
+    match &gemini_settings.auth {
+        crate::settings::GeminiAuthMode::ApiKey { api_key } => {
+            if api_key.is_empty() {
+                return Err(
+                    "Gemini API key is not configured. Set it in Settings → Gemini."
+                        .to_string(),
+                );
+            }
+        }
+        crate::settings::GeminiAuthMode::VertexAI { project_id, location, .. } => {
+            if project_id.is_empty() || location.is_empty() {
+                return Err(
+                    "Vertex AI project_id and location must be configured in Settings → Gemini."
+                        .to_string(),
+                );
+            }
+        }
     }
 
     // Create and connect the client
     let config = GeminiConfig {
-        api_key: gemini_settings.api_key,
+        auth: gemini_settings.auth.clone(),
         model: gemini_settings.model,
     };
     let mut client = GeminiLiveClient::new(config);
@@ -1039,6 +1062,7 @@ pub async fn start_gemini(
             let pipeline_status = state.pipeline_status.clone();
             let llm_engine = state.llm_engine.clone();
             let api_client = state.api_client.clone();
+            let mistralrs_engine = state.mistralrs_engine.clone();
             let llm_provider = state
                 .app_settings
                 .read()
@@ -1087,6 +1111,7 @@ pub async fn start_gemini(
                                         timestamp,
                                         &llm_engine,
                                         &api_client,
+                                        &mistralrs_engine,
                                         &llm_provider,
                                         &graph_extractor,
                                         &knowledge_graph,
@@ -1320,4 +1345,73 @@ pub async fn export_graph(state: State<'_, AppState>) -> Result<String, String> 
 #[tauri::command]
 pub async fn get_session_id(state: State<'_, AppState>) -> Result<String, String> {
     Ok(state.session_id.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Credential management commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn save_credential_cmd(key: String, value: String) -> Result<(), String> {
+    crate::credentials::set_credential(&key, &value)
+}
+
+#[tauri::command]
+pub fn load_credential_cmd(key: String) -> Result<Option<String>, String> {
+    let store = crate::credentials::load_credentials();
+    let value = match key.as_str() {
+        "openai_api_key" => store.openai_api_key,
+        "groq_api_key" => store.groq_api_key,
+        "together_api_key" => store.together_api_key,
+        "fireworks_api_key" => store.fireworks_api_key,
+        "deepgram_api_key" => store.deepgram_api_key,
+        "assemblyai_api_key" => store.assemblyai_api_key,
+        "gemini_api_key" => store.gemini_api_key,
+        "google_service_account_path" => store.google_service_account_path,
+        "aws_access_key" => store.aws_access_key,
+        "aws_secret_key" => store.aws_secret_key,
+        "aws_session_token" => store.aws_session_token,
+        "aws_profile" => store.aws_profile,
+        "aws_region" => store.aws_region,
+        _ => return Err(format!("Unknown credential key: {}", key)),
+    };
+    Ok(value)
+}
+
+#[tauri::command]
+pub fn load_all_credentials_cmd() -> crate::credentials::CredentialStore {
+    crate::credentials::load_credentials()
+}
+
+/// List available AWS profiles from ~/.aws/config and ~/.aws/credentials.
+#[tauri::command]
+pub fn list_aws_profiles() -> Vec<String> {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return vec![],
+    };
+    let mut profiles = std::collections::BTreeSet::new();
+
+    for filename in &["config", "credentials"] {
+        let path = home.join(".aws").join(filename);
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("[profile ") && trimmed.ends_with(']') {
+                    let name = &trimmed[9..trimmed.len() - 1];
+                    profiles.insert(name.to_string());
+                } else if trimmed == "[default]" {
+                    profiles.insert("default".to_string());
+                } else if *filename == "credentials"
+                    && trimmed.starts_with('[')
+                    && trimmed.ends_with(']')
+                {
+                    let name = &trimmed[1..trimmed.len() - 1];
+                    profiles.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    profiles.into_iter().collect()
 }

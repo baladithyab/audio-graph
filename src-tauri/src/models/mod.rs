@@ -24,10 +24,11 @@ struct ModelDef {
     description: &'static str,
 }
 
-const WHISPER_MODEL_URL: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin";
-const WHISPER_MODEL_FILENAME: &str = "ggml-small.en.bin";
-const WHISPER_EXPECTED_SIZE: u64 = 487_654_400; // ~466MB
+pub const WHISPER_MODEL_TINY_EN: &str = "ggml-tiny.en.bin";
+pub const WHISPER_MODEL_BASE_EN: &str = "ggml-base.en.bin";
+pub const WHISPER_MODEL_SMALL_EN: &str = "ggml-small.en.bin";
+pub const WHISPER_MODEL_MEDIUM_EN: &str = "ggml-medium.en.bin";
+pub const WHISPER_MODEL_LARGE_V3: &str = "ggml-large-v3.bin";
 
 const LLM_MODEL_URL: &str = "https://huggingface.co/LiquidAI/LFM2-350M-Extract-GGUF/resolve/main/lfm2-350m-extract-q4_k_m.gguf";
 /// Public so that commands can reference the canonical LLM model filename.
@@ -39,13 +40,48 @@ const SORTFORMER_MODEL_URL: &str = "https://huggingface.co/altunenes/parakeet-rs
 pub const SORTFORMER_MODEL_FILENAME: &str = "diar_streaming_sortformer_4spk-v2.onnx";
 const SORTFORMER_EXPECTED_SIZE: u64 = 31_500_000; // ~30MB
 
+/// Sherpa-onnx streaming Zipformer model directory name.
+pub const SHERPA_ZIPFORMER_20M: &str = "streaming-zipformer-en-20M";
+/// Sherpa-onnx Zipformer model archive URL (GitHub releases).
+const SHERPA_ZIPFORMER_20M_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2";
+/// Expected archive size (~20MB compressed, ~65MB extracted).
+const SHERPA_ZIPFORMER_20M_EXPECTED_SIZE: u64 = 65_000_000;
+
 const MODELS: &[ModelDef] = &[
     ModelDef {
+        name: "Whisper Tiny (English)",
+        filename: WHISPER_MODEL_TINY_EN,
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+        expected_size: Some(77_700_000),
+        description: "Fastest model (~75MB). 5x faster than Small, lower accuracy. Good for weak hardware.",
+    },
+    ModelDef {
+        name: "Whisper Base (English)",
+        filename: WHISPER_MODEL_BASE_EN,
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+        expected_size: Some(147_500_000),
+        description: "Best real-time balance (~142MB). 2-3x faster than Small on Apple Silicon.",
+    },
+    ModelDef {
         name: "Whisper Small (English)",
-        filename: WHISPER_MODEL_FILENAME,
-        url: WHISPER_MODEL_URL,
-        expected_size: Some(WHISPER_EXPECTED_SIZE),
-        description: "Speech recognition model for English transcription",
+        filename: WHISPER_MODEL_SMALL_EN,
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+        expected_size: Some(487_654_400),
+        description: "Default model (~466MB). Good accuracy/speed balance.",
+    },
+    ModelDef {
+        name: "Whisper Medium (English)",
+        filename: WHISPER_MODEL_MEDIUM_EN,
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
+        expected_size: Some(1_533_800_000),
+        description: "High accuracy (~1.5GB). Requires strong GPU for real-time.",
+    },
+    ModelDef {
+        name: "Whisper Large v3 (Multilingual)",
+        filename: WHISPER_MODEL_LARGE_V3,
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+        expected_size: Some(3_094_600_000),
+        description: "Best accuracy (~3GB). Multilingual. Requires powerful GPU.",
     },
     ModelDef {
         name: "LFM2-350M Extract (Entity Extraction)",
@@ -60,6 +96,13 @@ const MODELS: &[ModelDef] = &[
         url: SORTFORMER_MODEL_URL,
         expected_size: Some(SORTFORMER_EXPECTED_SIZE),
         description: "Streaming speaker diarization — up to 4 speakers (NVIDIA Sortformer ONNX)",
+    },
+    ModelDef {
+        name: "Sherpa Zipformer 20M (Streaming ASR)",
+        filename: SHERPA_ZIPFORMER_20M,
+        url: SHERPA_ZIPFORMER_20M_URL,
+        expected_size: Some(SHERPA_ZIPFORMER_20M_EXPECTED_SIZE),
+        description: "Streaming ASR via Zipformer transducer — sub-200ms first-word latency (sherpa-onnx)",
     },
 ];
 
@@ -177,7 +220,7 @@ fn check_model_readiness(
 pub fn get_model_status(app: &AppHandle) -> ModelStatus {
     let dir = get_models_dir(app);
     ModelStatus {
-        whisper: check_model_readiness(&dir, WHISPER_MODEL_FILENAME, Some(WHISPER_EXPECTED_SIZE)),
+        whisper: check_model_readiness(&dir, WHISPER_MODEL_SMALL_EN, Some(487_654_400)),
         llm: check_model_readiness(&dir, LLM_MODEL_FILENAME, Some(LLM_EXPECTED_SIZE)),
         sortformer: check_model_readiness(
             &dir,

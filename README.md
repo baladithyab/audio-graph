@@ -19,20 +19,60 @@ The pipeline streams audio through Voice Activity Detection, Automatic Speech Re
 
 ## Features
 
-- **Multi-source audio capture** — System default, specific devices, per-application (Linux PipeWire, Windows WASAPI, macOS CoreAudio)
-- **Real-time audio processing** — 48kHz→16kHz resampling via `rubato`, stereo→mono downmix
-- **Voice Activity Detection** — Silero VAD v5 (ONNX) for speech segmentation
-- **Automatic Speech Recognition** — `whisper-rs` (`whisper.cpp`) with configurable model size
-- **Speaker Diarization** — MVP audio-feature-based clustering (RMS energy, zero-crossing rate)
-- **Entity Extraction** — 3-tier chain: native LLM (llama-cpp-2) → OpenAI-compatible API → rule-based NER
-- 💬 **Chat Sidebar** — Ask questions about the conversation and knowledge graph
-- 🧠 **Native LLM Inference** — In-process GGUF model via llama-cpp-2 (replaces HTTP sidecar)
-- **Temporal Knowledge Graph** — `petgraph`-based graph with episodic memory, entity resolution (Jaro-Winkler), temporal decay
-- **Live Visualization** — `react-force-graph-2d` with color-coded entity types
-- **Live Transcript** — Scrolling transcript with speaker labels and timestamps
-- **Pipeline Status Monitor** — Real-time display of each pipeline stage
-- **Dark Theme** — Full dark theme with CSS custom properties
-- **Graceful Degradation** — Falls back to diarization-only mode if Whisper model unavailable
+- **Multi-source audio capture** -- System default, specific devices, per-application (Linux PipeWire, Windows WASAPI, macOS CoreAudio)
+- **Multi-provider ASR** -- 5 providers: local Whisper, Groq/OpenAI API, AWS Transcribe, Deepgram, AssemblyAI
+- **Multi-provider LLM** -- 3 providers: local llama.cpp, OpenAI-compatible API, AWS Bedrock
+- **Gemini Live** -- Streaming transcription + model responses via Google Gemini (API Key or Vertex AI)
+- **Real-time audio processing** -- 48kHz to 16kHz resampling via `rubato`, stereo to mono downmix
+- **Voice Activity Detection** -- Silero VAD v5 (ONNX) for speech segmentation
+- **Speaker Diarization** -- Audio-feature clustering (MVP) plus cloud diarization via Deepgram/AssemblyAI/AWS
+- **Entity Extraction** -- 3-tier chain: native LLM (llama-cpp-2) then OpenAI-compatible API then rule-based NER
+- **Chat Sidebar** -- Ask questions about the conversation and knowledge graph
+- **Native LLM Inference** -- In-process GGUF model via llama-cpp-2
+- **Temporal Knowledge Graph** -- `petgraph`-based graph with episodic memory, entity resolution (Jaro-Winkler), temporal decay
+- **Live Visualization** -- `react-force-graph-2d` with color-coded entity types
+- **Live Transcript** -- Scrolling transcript with speaker labels and timestamps
+- **Pipeline Status Monitor** -- Real-time display of each pipeline stage
+- **Persistence** -- File-based auto-save of transcripts and knowledge graph per session
+- **Dark Theme** -- Full dark theme with CSS custom properties
+- **Graceful Degradation** -- Falls back to diarization-only mode if Whisper model unavailable
+
+---
+
+## Provider Options
+
+AudioGraph supports swappable providers at every pipeline stage. Choose based on your hardware, budget, and privacy requirements.
+
+### ASR (Automatic Speech Recognition)
+
+| Provider | Type | Protocol | Streaming | Diarization | Cost |
+|---|---|---|---|---|---|
+| **Local Whisper** | Local | whisper-rs (C++ FFI) | No (batch) | No | Free |
+| **Groq / OpenAI API** | Cloud | HTTP multipart | No (batch) | No | Per-minute |
+| **AWS Transcribe** | Cloud | HTTP/2 (AWS SDK) | Yes | Yes (built-in) | $0.024/min |
+| **Deepgram** | Cloud | WebSocket | Yes | Yes (built-in) | $0.0077/min |
+| **AssemblyAI** | Cloud | WebSocket | Yes | Yes (built-in) | $0.012/min |
+| **Sherpa-ONNX** | Local | ONNX (Zipformer transducer) | Yes | Yes | Free |
+
+### LLM (Entity Extraction + Chat)
+
+| Provider | Type | Protocol | Cost |
+|---|---|---|---|
+| **Local llama.cpp** | Local | In-process GGUF | Free |
+| **OpenAI-compatible API** | Cloud | HTTP JSON | Per-token |
+| **AWS Bedrock** | Cloud | HTTP (AWS SDK) | Per-token |
+| **Mistral.rs** | Local | In-process GGUF (Candle) | Free |
+
+> **Note:** Sherpa-ONNX streaming ASR requires the `sherpa-streaming` cargo feature flag: `cargo build --features sherpa-streaming`
+
+### Gemini Live (Full Pipeline)
+
+| Auth Mode | Use Case | Mechanism |
+|---|---|---|
+| **AI Studio API Key** | Developer / consumer | API key in query param |
+| **Vertex AI** | Enterprise / GCP | Bearer token via gcp_auth |
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for full provider details, decision trees, and configuration examples.
 
 ---
 

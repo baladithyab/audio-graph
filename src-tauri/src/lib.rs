@@ -15,6 +15,7 @@
 pub mod asr;
 pub mod audio;
 pub mod commands;
+pub mod credentials;
 pub mod diarization;
 pub mod events;
 pub mod gemini;
@@ -76,6 +77,11 @@ pub fn run() {
             commands::load_graph,
             commands::export_graph,
             commands::get_session_id,
+            // Credential management
+            commands::save_credential_cmd,
+            commands::load_credential_cmd,
+            commands::load_all_credentials_cmd,
+            commands::list_aws_profiles,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AudioGraph");

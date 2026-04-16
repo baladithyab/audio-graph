@@ -12,6 +12,7 @@ use std::time::Duration;
 use crossbeam_channel::Receiver;
 use tauri::{AppHandle, Emitter};
 
+use crate::asr::cloud::CloudAsrConfig;
 use crate::asr::{AsrConfig, AsrWorker};
 use crate::audio::pipeline::ProcessedAudioChunk;
 use crate::diarization::{
@@ -21,7 +22,7 @@ use crate::events::{self, PipelineStatus, StageStatus};
 use crate::graph::entities::{ExtractionResult, GraphSnapshot};
 use crate::graph::extraction::RuleBasedExtractor;
 use crate::graph::temporal::TemporalKnowledgeGraph;
-use crate::llm::{ApiClient, LlmEngine};
+use crate::llm::{ApiClient, LlmEngine, MistralRsEngine};
 use crate::models::SORTFORMER_MODEL_FILENAME;
 use crate::settings::{AsrProvider, LlmProvider};
 use crate::state::TranscriptSegment;
@@ -150,6 +151,37 @@ fn try_api_client(
     }
 }
 
+/// Try entity extraction using the mistral.rs engine.
+/// Returns `None` if no engine is loaded or extraction fails.
+fn try_mistralrs_engine(
+    text: &str,
+    speaker: &str,
+    mistralrs_engine: &Arc<Mutex<Option<MistralRsEngine>>>,
+) -> Option<ExtractionResult> {
+    let engine_guard = mistralrs_engine.lock().unwrap_or_else(|e| {
+        log::warn!("mistral.rs engine mutex poisoned, recovering: {}", e);
+        e.into_inner()
+    });
+    if let Some(ref engine) = *engine_guard {
+        match engine.extract_entities(text, speaker) {
+            Ok(result) => {
+                log::debug!(
+                    "mistral.rs extraction: {} entities, {} relations",
+                    result.entities.len(),
+                    result.relations.len()
+                );
+                Some(result)
+            }
+            Err(e) => {
+                log::warn!("mistral.rs extraction failed: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper: extraction + graph update + event emission (I1: deduplicated)
 // ---------------------------------------------------------------------------
@@ -169,6 +201,7 @@ pub(crate) fn process_extraction_and_emit(
     timestamp: f64,
     llm_engine: &Arc<Mutex<Option<LlmEngine>>>,
     api_client: &Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: &Arc<Mutex<Option<MistralRsEngine>>>,
     llm_provider: &LlmProvider,
     graph_extractor: &Arc<RuleBasedExtractor>,
     knowledge_graph: &Arc<Mutex<TemporalKnowledgeGraph>>,
@@ -186,10 +219,17 @@ pub(crate) fn process_extraction_and_emit(
                 .or_else(|| try_api_client(text, speaker, api_client))
                 .unwrap_or_else(|| graph_extractor.extract(speaker, text))
         }
-        LlmProvider::Api { .. } => {
+        LlmProvider::Api { .. } | LlmProvider::AwsBedrock { .. } => {
             // Prefer API → fallback to native LLM → fallback to rule-based
             try_api_client(text, speaker, api_client)
                 .or_else(|| try_native_llm(text, speaker, llm_engine))
+                .unwrap_or_else(|| graph_extractor.extract(speaker, text))
+        }
+        LlmProvider::MistralRs { .. } => {
+            // Prefer mistral.rs → fallback to native LLM → fallback to API → rule-based
+            try_mistralrs_engine(text, speaker, mistralrs_engine)
+                .or_else(|| try_native_llm(text, speaker, llm_engine))
+                .or_else(|| try_api_client(text, speaker, api_client))
                 .unwrap_or_else(|| graph_extractor.extract(speaker, text))
         }
     };
@@ -270,6 +310,7 @@ fn spawn_extraction_task(
     timestamp: f64,
     llm_engine: &Arc<Mutex<Option<LlmEngine>>>,
     api_client: &Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: &Arc<Mutex<Option<MistralRsEngine>>>,
     llm_provider: &LlmProvider,
     graph_extractor: &Arc<RuleBasedExtractor>,
     knowledge_graph: &Arc<Mutex<TemporalKnowledgeGraph>>,
@@ -281,6 +322,7 @@ fn spawn_extraction_task(
 ) {
     let llm_engine = llm_engine.clone();
     let api_client = api_client.clone();
+    let mistralrs_engine = mistralrs_engine.clone();
     let llm_provider = llm_provider.clone();
     let graph_extractor = graph_extractor.clone();
     let knowledge_graph = knowledge_graph.clone();
@@ -300,6 +342,7 @@ fn spawn_extraction_task(
             timestamp,
             &llm_engine,
             &api_client,
+            &mistralrs_engine,
             &llm_provider,
             &graph_extractor,
             &knowledge_graph,
@@ -438,9 +481,11 @@ pub(crate) fn run_speech_processor(
     graph_extractor: Arc<RuleBasedExtractor>,
     llm_engine: Arc<Mutex<Option<LlmEngine>>>,
     api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
     models_dir: PathBuf,
     asr_provider: AsrProvider,
     llm_provider: LlmProvider,
+    whisper_model: String,
 ) {
     // Macro to reduce duplication: each fallback site calls
     // run_speech_processor_diarization_only with the same arguments
@@ -460,6 +505,7 @@ pub(crate) fn run_speech_processor(
                 graph_extractor,
                 llm_engine,
                 api_client,
+                mistralrs_engine,
                 models_dir,
                 llm_provider,
             );
@@ -481,22 +527,225 @@ pub(crate) fn run_speech_processor(
                 model
             );
         }
+        LlmProvider::AwsBedrock {
+            region, model_id, ..
+        } => {
+            log::info!(
+                "Speech processor: LLM provider is AWS Bedrock (region={}, model={}) — will prefer API client for entity extraction.",
+                region,
+                model_id
+            );
+        }
+        LlmProvider::MistralRs { ref model_id } => {
+            log::info!(
+                "Speech processor: LLM provider is mistral.rs (model={}).",
+                model_id
+            );
+        }
     }
 
     // ── Respect AsrProvider setting ──────────────────────────────────────
-    // If the user has selected an API provider for ASR, skip local Whisper
-    // model loading entirely and run in diarization-only mode.
-    if matches!(asr_provider, AsrProvider::Api { .. }) {
+    // If the user has selected a cloud API provider for ASR, launch the
+    // cloud ASR worker instead of loading local Whisper.
+    if let AsrProvider::Api {
+        ref endpoint,
+        ref api_key,
+        ref model,
+    } = asr_provider
+    {
         log::info!(
-            "Speech processor: ASR provider is API — skipping local Whisper model, \
-             running diarization-only mode."
+            "Speech processor: ASR provider is cloud API (endpoint={}, model={}) — \
+             launching cloud ASR worker.",
+            endpoint,
+            model
+        );
+        let cloud_config = CloudAsrConfig {
+            endpoint: endpoint.clone(),
+            api_key: api_key.clone(),
+            model: model.clone(),
+            language: "en".to_string(),
+        };
+        run_cloud_asr_speech_processor(
+            processed_rx,
+            is_transcribing,
+            transcript_buffer,
+            transcript_writer,
+            pipeline_status,
+            app_handle,
+            knowledge_graph,
+            graph_snapshot,
+            graph_extractor,
+            llm_engine,
+            api_client,
+            mistralrs_engine,
+            models_dir,
+            llm_provider,
+            cloud_config,
+        );
+        return;
+    }
+
+    // If the user selected Deepgram streaming ASR, launch the streaming
+    // WebSocket worker instead of loading local Whisper.
+    if let AsrProvider::DeepgramStreaming {
+        ref api_key,
+        ref model,
+        enable_diarization,
+    } = asr_provider
+    {
+        log::info!(
+            "Speech processor: ASR provider is Deepgram streaming (model={}) — \
+             launching Deepgram streaming worker.",
+            model
+        );
+        let deepgram_config = crate::asr::deepgram::DeepgramConfig {
+            api_key: api_key.clone(),
+            model: model.clone(),
+            enable_diarization,
+        };
+        run_deepgram_speech_processor(
+            processed_rx,
+            is_transcribing,
+            transcript_buffer,
+            transcript_writer,
+            pipeline_status,
+            app_handle,
+            knowledge_graph,
+            graph_snapshot,
+            graph_extractor,
+            llm_engine,
+            api_client,
+            mistralrs_engine,
+            models_dir,
+            llm_provider,
+            deepgram_config,
+        );
+        return;
+    }
+
+    // If the user selected AssemblyAI streaming ASR, launch the streaming
+    // WebSocket worker instead of loading local Whisper.
+    if let AsrProvider::AssemblyAI {
+        ref api_key,
+        enable_diarization,
+    } = asr_provider
+    {
+        log::info!(
+            "Speech processor: ASR provider is AssemblyAI streaming — \
+             launching AssemblyAI streaming worker."
+        );
+        let assemblyai_config = crate::asr::assemblyai::AssemblyAIConfig {
+            api_key: api_key.clone(),
+            enable_diarization,
+        };
+        run_assemblyai_speech_processor(
+            processed_rx,
+            is_transcribing,
+            transcript_buffer,
+            transcript_writer,
+            pipeline_status,
+            app_handle,
+            knowledge_graph,
+            graph_snapshot,
+            graph_extractor,
+            llm_engine,
+            api_client,
+            mistralrs_engine,
+            models_dir,
+            llm_provider,
+            assemblyai_config,
+        );
+        return;
+    }
+
+    if let AsrProvider::AwsTranscribe {
+        ref region,
+        ref language_code,
+        ref credential_source,
+        enable_diarization,
+    } = asr_provider
+    {
+        log::info!(
+            "Speech processor: ASR provider is AWS Transcribe (region={}) — \
+             launching streaming session.",
+            region
+        );
+        let aws_config = crate::asr::aws_transcribe::AwsTranscribeConfig {
+            region: region.clone(),
+            language_code: language_code.clone(),
+            credential_source: credential_source.clone(),
+            enable_diarization,
+        };
+        run_aws_transcribe_speech_processor(
+            processed_rx,
+            is_transcribing,
+            transcript_buffer,
+            transcript_writer,
+            pipeline_status,
+            app_handle,
+            knowledge_graph,
+            graph_snapshot,
+            graph_extractor,
+            llm_engine,
+            api_client,
+            mistralrs_engine,
+            models_dir,
+            llm_provider,
+            aws_config,
+        );
+        return;
+    }
+
+    // If the user selected sherpa-onnx streaming ASR, launch the streaming
+    // worker that processes every audio chunk frame-by-frame.
+    #[cfg(feature = "sherpa-streaming")]
+    if let AsrProvider::SherpaOnnx {
+        ref model_dir,
+        enable_endpoint_detection,
+    } = asr_provider
+    {
+        log::info!(
+            "Speech processor: ASR provider is sherpa-onnx streaming (model_dir={}) — \
+             launching streaming worker.",
+            model_dir
+        );
+        let sherpa_config = crate::asr::sherpa_streaming::SherpaStreamingConfig {
+            model_dir: models_dir.join(model_dir),
+            enable_endpoint_detection,
+        };
+        run_sherpa_onnx_speech_processor(
+            processed_rx,
+            is_transcribing,
+            transcript_buffer,
+            transcript_writer,
+            pipeline_status,
+            app_handle,
+            knowledge_graph,
+            graph_snapshot,
+            graph_extractor,
+            llm_engine,
+            api_client,
+            mistralrs_engine,
+            models_dir,
+            llm_provider,
+            sherpa_config,
+        );
+        return;
+    }
+
+    #[cfg(not(feature = "sherpa-streaming"))]
+    if matches!(asr_provider, AsrProvider::SherpaOnnx { .. }) {
+        log::error!(
+            "Speech processor: sherpa-onnx ASR provider selected but the \
+             'sherpa-streaming' feature is not enabled. Falling back to \
+             diarization-only mode."
         );
         fallback_diarization_only!();
     }
 
     log::info!("Speech processor: loading Whisper model...");
 
-    let asr_config = AsrConfig::with_models_dir(&models_dir);
+    let asr_config = AsrConfig::with_models_dir_and_model(&models_dir, &whisper_model);
     let model_path_str = asr_config.model_path.display().to_string();
 
     // ── Pre-validate model file ─────────────────────────────────────────
@@ -564,10 +813,11 @@ pub(crate) fn run_speech_processor(
             let graph_extractor = graph_extractor.clone();
             let llm_engine = llm_engine.clone();
             let api_client = api_client.clone();
+            let mistralrs_engine = mistralrs_engine.clone();
             let llm_provider = llm_provider.clone();
             let models_dir = models_dir.clone();
             let model_path_str = model_path_str.clone();
-            let asr_config = AsrConfig::with_models_dir(&models_dir);
+            let asr_config = AsrConfig::with_models_dir_and_model(&models_dir, &whisper_model);
 
             move || {
                 run_asr_worker(
@@ -582,6 +832,7 @@ pub(crate) fn run_speech_processor(
                     graph_extractor,
                     llm_engine,
                     api_client,
+                    mistralrs_engine,
                     llm_provider,
                     models_dir,
                     model_path_str,
@@ -678,6 +929,7 @@ fn run_asr_worker(
     graph_extractor: Arc<RuleBasedExtractor>,
     llm_engine: Arc<Mutex<Option<LlmEngine>>>,
     api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
     llm_provider: LlmProvider,
     models_dir: PathBuf,
     model_path_str: String,
@@ -813,6 +1065,7 @@ fn run_asr_worker(
                         diarized.segment.start_time,
                         &llm_engine,
                         &api_client,
+                        &mistralrs_engine,
                         &llm_provider,
                         &graph_extractor,
                         &knowledge_graph,
@@ -853,6 +1106,7 @@ pub(crate) fn run_speech_processor_diarization_only(
     graph_extractor: Arc<RuleBasedExtractor>,
     llm_engine: Arc<Mutex<Option<LlmEngine>>>,
     api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
     models_dir: PathBuf,
     llm_provider: LlmProvider,
 ) {
@@ -963,6 +1217,7 @@ pub(crate) fn run_speech_processor_diarization_only(
             diarized.segment.start_time,
             &llm_engine,
             &api_client,
+            &mistralrs_engine,
             &llm_provider,
             &graph_extractor,
             &knowledge_graph,
@@ -981,8 +1236,1178 @@ pub(crate) fn run_speech_processor_diarization_only(
 }
 
 // ---------------------------------------------------------------------------
+// Cloud ASR speech processor (batch HTTP API)
+// ---------------------------------------------------------------------------
+
+/// Cloud ASR speech processor — same 2-thread architecture as the local
+/// Whisper path, but the ASR worker sends accumulated segments to a cloud
+/// STT API (OpenAI-compatible: Groq, OpenAI, Deepgram REST, etc.)
+/// instead of running local inference.
+pub(crate) fn run_cloud_asr_speech_processor(
+    processed_rx: Receiver<ProcessedAudioChunk>,
+    is_transcribing: Arc<AtomicBool>,
+    transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
+    pipeline_status: Arc<RwLock<PipelineStatus>>,
+    app_handle: AppHandle,
+    knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
+    graph_snapshot: Arc<RwLock<GraphSnapshot>>,
+    graph_extractor: Arc<RuleBasedExtractor>,
+    llm_engine: Arc<Mutex<Option<LlmEngine>>>,
+    api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
+    models_dir: PathBuf,
+    llm_provider: LlmProvider,
+    cloud_config: CloudAsrConfig,
+) {
+    let (asr_seg_tx, asr_seg_rx) = crossbeam_channel::bounded::<AccumulatedSegment>(4);
+
+    let is_transcribing_asr = is_transcribing.clone();
+    let _asr_worker_handle = std::thread::Builder::new()
+        .name("cloud-asr-worker".to_string())
+        .spawn({
+            let transcript_buffer = transcript_buffer.clone();
+            let transcript_writer = transcript_writer.clone();
+            let pipeline_status = pipeline_status.clone();
+            let app_handle = app_handle.clone();
+            let knowledge_graph = knowledge_graph.clone();
+            let graph_snapshot = graph_snapshot.clone();
+            let graph_extractor = graph_extractor.clone();
+            let llm_engine = llm_engine.clone();
+            let api_client = api_client.clone();
+            let mistralrs_engine = mistralrs_engine.clone();
+            let llm_provider = llm_provider.clone();
+            let models_dir = models_dir.clone();
+
+            move || {
+                run_cloud_asr_worker(
+                    asr_seg_rx,
+                    is_transcribing_asr,
+                    transcript_buffer,
+                    transcript_writer,
+                    pipeline_status,
+                    app_handle,
+                    knowledge_graph,
+                    graph_snapshot,
+                    graph_extractor,
+                    llm_engine,
+                    api_client,
+                    mistralrs_engine,
+                    llm_provider,
+                    models_dir,
+                    cloud_config,
+                );
+            }
+        });
+
+    if let Ok(mut status) = pipeline_status.write() {
+        status.asr = StageStatus::Running { processed_count: 0 };
+    }
+
+    log::info!("Cloud ASR speech processor: entering accumulator loop");
+    let mut accumulator = AudioAccumulator::new();
+
+    loop {
+        let chunk = match processed_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(chunk) => chunk,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !is_transcribing.load(Ordering::Relaxed) {
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
+
+        if !is_transcribing.load(Ordering::Relaxed) {
+            break;
+        }
+
+        if let Some(segment) = accumulator.feed(&chunk) {
+            if let Err(crossbeam_channel::TrySendError::Full(_)) = asr_seg_tx.try_send(segment) {
+                log::warn!("Cloud ASR: segment channel full, dropping segment (API slower than real-time)");
+            }
+        }
+    }
+
+    if let Some(final_seg) = accumulator.flush() {
+        let _ = asr_seg_tx.try_send(final_seg);
+    }
+    drop(asr_seg_tx);
+
+    log::info!("Cloud ASR speech processor: accumulator loop exited");
+}
+
+/// Cloud ASR worker thread — receives accumulated segments, transcribes via
+/// HTTP API, then runs the same diarization + extraction pipeline as local.
+fn run_cloud_asr_worker(
+    asr_seg_rx: Receiver<AccumulatedSegment>,
+    is_transcribing: Arc<AtomicBool>,
+    transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
+    pipeline_status: Arc<RwLock<PipelineStatus>>,
+    app_handle: AppHandle,
+    knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
+    graph_snapshot: Arc<RwLock<GraphSnapshot>>,
+    graph_extractor: Arc<RuleBasedExtractor>,
+    llm_engine: Arc<Mutex<Option<LlmEngine>>>,
+    api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
+    llm_provider: LlmProvider,
+    models_dir: PathBuf,
+    cloud_config: CloudAsrConfig,
+) {
+    let diarization_config = make_diarization_config(&models_dir);
+    let (dummy_diar_tx, _dummy_diar_rx) = crossbeam_channel::unbounded::<DiarizedTranscript>();
+    let mut diarization_worker = DiarizationWorker::new(diarization_config, dummy_diar_tx);
+
+    let mut asr_count: u64 = 0;
+    let mut diarization_count: u64 = 0;
+    let extraction_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let graph_update_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    log::info!(
+        "Cloud ASR worker: entering processing loop (endpoint={}, model={})",
+        cloud_config.endpoint,
+        cloud_config.model
+    );
+
+    loop {
+        let segment = match asr_seg_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(seg) => seg,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !is_transcribing.load(Ordering::Relaxed) {
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
+
+        if !is_transcribing.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let speech_segment = AccumulatedSegment::to_asr_segment(&segment);
+        match crate::asr::cloud::transcribe_segment(&cloud_config, &speech_segment) {
+            Ok(transcripts) => {
+                for transcript in transcripts {
+                    asr_count += 1;
+
+                    let input = DiarizationInput {
+                        transcript,
+                        speech_audio: segment.audio.clone(),
+                        speech_start_time: segment.start_time,
+                        speech_end_time: segment.end_time,
+                    };
+                    let diarized = diarization_worker.process_input(input);
+                    diarization_count += 1;
+
+                    if let Ok(mut buffer) = transcript_buffer.write() {
+                        buffer.push_back(diarized.segment.clone());
+                        if buffer.len() > 500 {
+                            buffer.pop_front();
+                        }
+                    }
+                    if let Ok(writer_guard) = transcript_writer.lock() {
+                        if let Some(ref writer) = *writer_guard {
+                            writer.append(&diarized.segment);
+                        }
+                    }
+
+                    let _ = app_handle.emit(events::TRANSCRIPT_UPDATE, &diarized.segment);
+                    let _ = app_handle.emit(events::SPEAKER_DETECTED, &diarized.speaker_info);
+
+                    if let Ok(mut status) = pipeline_status.write() {
+                        status.asr = StageStatus::Running {
+                            processed_count: asr_count,
+                        };
+                        status.diarization = StageStatus::Running {
+                            processed_count: diarization_count,
+                        };
+                    }
+
+                    log::debug!(
+                        "Cloud ASR worker: emitted transcript #{} speaker={:?} \"{}\"",
+                        asr_count,
+                        diarized.segment.speaker_label,
+                        &diarized.segment.text,
+                    );
+
+                    spawn_extraction_task(
+                        diarized.segment.text.clone(),
+                        diarized
+                            .segment
+                            .speaker_label
+                            .clone()
+                            .unwrap_or_else(|| "Unknown".to_string()),
+                        diarized.segment.id.clone(),
+                        diarized.segment.start_time,
+                        &llm_engine,
+                        &api_client,
+                        &mistralrs_engine,
+                        &llm_provider,
+                        &graph_extractor,
+                        &knowledge_graph,
+                        &graph_snapshot,
+                        &pipeline_status,
+                        &app_handle,
+                        &extraction_count,
+                        &graph_update_count,
+                    );
+                }
+            }
+            Err(e) => {
+                log::warn!("Cloud ASR worker: transcription failed: {}", e);
+                if let Ok(mut status) = pipeline_status.write() {
+                    status.asr = StageStatus::Error {
+                        message: format!("Cloud ASR error: {}", e),
+                    };
+                }
+            }
+        }
+    }
+
+    log::info!(
+        "Cloud ASR worker: exiting. ASR segments={}, diarized={}",
+        asr_count,
+        diarization_count,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Deepgram Streaming ASR speech processor
+// ---------------------------------------------------------------------------
+
+/// Deepgram streaming speech processor — no accumulation needed.
+///
+/// Unlike batch ASR (local Whisper or cloud HTTP), Deepgram streaming receives
+/// audio chunks directly and returns transcript results over the WebSocket.
+/// This function:
+/// 1. Creates a `DeepgramStreamingClient` and connects.
+/// 2. Reads `ProcessedAudioChunk`s directly from the processed channel.
+/// 3. Sends raw audio to Deepgram via `send_audio()`.
+/// 4. Spawns a receiver thread that consumes Deepgram events, wraps final
+///    transcripts as `TranscriptSegment`s, and feeds them through the
+///    diarization + storage + events + extraction pipeline.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_deepgram_speech_processor(
+    processed_rx: Receiver<ProcessedAudioChunk>,
+    is_transcribing: Arc<AtomicBool>,
+    transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
+    pipeline_status: Arc<RwLock<PipelineStatus>>,
+    app_handle: AppHandle,
+    knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
+    graph_snapshot: Arc<RwLock<GraphSnapshot>>,
+    graph_extractor: Arc<RuleBasedExtractor>,
+    llm_engine: Arc<Mutex<Option<LlmEngine>>>,
+    api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
+    models_dir: PathBuf,
+    llm_provider: LlmProvider,
+    deepgram_config: crate::asr::deepgram::DeepgramConfig,
+) {
+    use crate::asr::deepgram::DeepgramStreamingClient;
+
+    // Create and connect the Deepgram client.
+    let mut client = DeepgramStreamingClient::new(deepgram_config);
+    match client.connect() {
+        Ok(()) => {
+            log::info!("Deepgram streaming: connected successfully");
+        }
+        Err(e) => {
+            log::error!("Deepgram streaming: failed to connect: {e}");
+            if let Ok(mut status) = pipeline_status.write() {
+                status.asr = StageStatus::Error {
+                    message: format!("Deepgram connect failed: {e}"),
+                };
+            }
+            return;
+        }
+    }
+
+    let event_rx = client.event_rx();
+
+    // Spawn the Deepgram event receiver thread (processes transcript results).
+    let is_transcribing_rx = is_transcribing.clone();
+    let _receiver_handle = std::thread::Builder::new()
+        .name("deepgram-event-rx".to_string())
+        .spawn({
+            let transcript_buffer = transcript_buffer.clone();
+            let transcript_writer = transcript_writer.clone();
+            let pipeline_status = pipeline_status.clone();
+            let app_handle = app_handle.clone();
+            let knowledge_graph = knowledge_graph.clone();
+            let graph_snapshot = graph_snapshot.clone();
+            let graph_extractor = graph_extractor.clone();
+            let llm_engine = llm_engine.clone();
+            let api_client = api_client.clone();
+            let mistralrs_engine = mistralrs_engine.clone();
+            let llm_provider = llm_provider.clone();
+            let models_dir = models_dir.clone();
+
+            move || {
+                run_deepgram_event_receiver(
+                    event_rx,
+                    is_transcribing_rx,
+                    transcript_buffer,
+                    transcript_writer,
+                    pipeline_status,
+                    app_handle,
+                    knowledge_graph,
+                    graph_snapshot,
+                    graph_extractor,
+                    llm_engine,
+                    api_client,
+                    mistralrs_engine,
+                    models_dir,
+                    llm_provider,
+                );
+            }
+        });
+
+    // Mark ASR as running.
+    if let Ok(mut status) = pipeline_status.write() {
+        status.asr = StageStatus::Running { processed_count: 0 };
+    }
+
+    // Audio sender loop: reads chunks and forwards to Deepgram.
+    log::info!("Deepgram streaming: entering audio sender loop");
+    let mut chunks_sent: u64 = 0;
+
+    loop {
+        let chunk = match processed_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(chunk) => chunk,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !is_transcribing.load(Ordering::Relaxed) {
+                    log::info!("Deepgram streaming: is_transcribing flag cleared, exiting sender");
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                log::info!("Deepgram streaming: audio channel disconnected, exiting sender");
+                break;
+            }
+        };
+
+        if !is_transcribing.load(Ordering::Relaxed) {
+            log::info!("Deepgram streaming: is_transcribing flag cleared, exiting sender");
+            break;
+        }
+
+        if !client.is_connected() {
+            log::warn!("Deepgram streaming: client disconnected, exiting sender");
+            break;
+        }
+
+        // Send audio directly to Deepgram (no accumulation needed).
+        if let Err(e) = client.send_audio(&chunk.data) {
+            log::warn!("Deepgram streaming: failed to send audio: {e}");
+            break;
+        }
+
+        chunks_sent += 1;
+        if chunks_sent % 100 == 0 {
+            log::debug!("Deepgram streaming: sent {} audio chunks", chunks_sent);
+        }
+    }
+
+    // Disconnect the client.
+    client.disconnect();
+
+    log::info!(
+        "Deepgram streaming: audio sender exiting. Chunks sent={}",
+        chunks_sent
+    );
+}
+
+/// Deepgram event receiver thread — processes transcript events from the
+/// Deepgram WebSocket and feeds them into the diarization + storage + events
+/// + extraction pipeline (same downstream path as cloud ASR).
+#[allow(clippy::too_many_arguments)]
+fn run_deepgram_event_receiver(
+    event_rx: crossbeam_channel::Receiver<crate::asr::deepgram::DeepgramEvent>,
+    is_transcribing: Arc<AtomicBool>,
+    transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
+    pipeline_status: Arc<RwLock<PipelineStatus>>,
+    app_handle: AppHandle,
+    knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
+    graph_snapshot: Arc<RwLock<GraphSnapshot>>,
+    graph_extractor: Arc<RuleBasedExtractor>,
+    llm_engine: Arc<Mutex<Option<LlmEngine>>>,
+    api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
+    models_dir: PathBuf,
+    llm_provider: LlmProvider,
+) {
+    use crate::asr::deepgram::DeepgramEvent;
+    use crate::diarization::{DiarizationInput, DiarizationWorker, DiarizedTranscript};
+
+    let diarization_config = make_diarization_config(&models_dir);
+    let (dummy_diar_tx, _dummy_diar_rx) = crossbeam_channel::unbounded::<DiarizedTranscript>();
+    let mut diarization_worker = DiarizationWorker::new(diarization_config, dummy_diar_tx);
+
+    let mut asr_count: u64 = 0;
+    let mut diarization_count: u64 = 0;
+    let extraction_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let graph_update_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    log::info!("Deepgram event receiver: entering processing loop");
+
+    loop {
+        let event = match event_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(ev) => ev,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !is_transcribing.load(Ordering::Relaxed) {
+                    log::info!("Deepgram event receiver: is_transcribing flag cleared, exiting");
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                log::info!("Deepgram event receiver: event channel disconnected, exiting");
+                break;
+            }
+        };
+
+        if !is_transcribing.load(Ordering::Relaxed) {
+            log::info!("Deepgram event receiver: is_transcribing flag cleared, exiting");
+            break;
+        }
+
+        match event {
+            DeepgramEvent::Transcript {
+                text,
+                confidence,
+                is_final,
+                speech_final: _,
+                start,
+                duration,
+                words,
+            } => {
+                // Only process final transcripts to avoid duplicates.
+                if !is_final {
+                    log::debug!("Deepgram: interim transcript: \"{}\"", &text);
+                    continue;
+                }
+
+                asr_count += 1;
+                let end_time = start + duration;
+
+                // Determine speaker from word-level diarization if available.
+                let speaker_from_deepgram = words
+                    .first()
+                    .and_then(|w| w.speaker)
+                    .map(|s| format!("Speaker {}", s));
+
+                let segment = TranscriptSegment {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    source_id: "deepgram-stream".to_string(),
+                    speaker_id: speaker_from_deepgram.clone(),
+                    speaker_label: speaker_from_deepgram,
+                    text: text.clone(),
+                    start_time: start,
+                    end_time,
+                    confidence,
+                };
+
+                // If Deepgram provides speaker labels, use them directly.
+                // Otherwise, run through local diarization (needs audio, which
+                // we don't have in the event path — so we skip diarization
+                // and use the segment as-is).
+                let final_segment = if segment.speaker_label.is_some() {
+                    // Deepgram diarization provided speaker labels.
+                    diarization_count += 1;
+                    segment.clone()
+                } else {
+                    // No speaker from Deepgram; create a minimal diarization input
+                    // with empty audio (the Simple diarization backend will
+                    // assign a speaker based on signal heuristics, but with
+                    // empty audio it will just assign a default speaker).
+                    let input = DiarizationInput {
+                        transcript: segment.clone(),
+                        speech_audio: vec![],
+                        speech_start_time: Duration::from_secs_f64(start),
+                        speech_end_time: Duration::from_secs_f64(end_time),
+                    };
+                    let diarized = diarization_worker.process_input(input);
+                    diarization_count += 1;
+
+                    let _ = app_handle.emit(events::SPEAKER_DETECTED, &diarized.speaker_info);
+                    diarized.segment
+                };
+
+                // Store in transcript buffer + persist to disk.
+                if let Ok(mut buffer) = transcript_buffer.write() {
+                    buffer.push_back(final_segment.clone());
+                    if buffer.len() > 500 {
+                        buffer.pop_front();
+                    }
+                }
+                if let Ok(writer_guard) = transcript_writer.lock() {
+                    if let Some(ref writer) = *writer_guard {
+                        writer.append(&final_segment);
+                    }
+                }
+
+                // Emit Tauri events.
+                let _ = app_handle.emit(events::TRANSCRIPT_UPDATE, &final_segment);
+
+                // Update pipeline status.
+                if let Ok(mut status) = pipeline_status.write() {
+                    status.asr = StageStatus::Running {
+                        processed_count: asr_count,
+                    };
+                    status.diarization = StageStatus::Running {
+                        processed_count: diarization_count,
+                    };
+                }
+
+                log::debug!(
+                    "Deepgram event receiver: emitted transcript #{} speaker={:?} \"{}\"",
+                    asr_count,
+                    final_segment.speaker_label,
+                    &final_segment.text,
+                );
+
+                // Knowledge Graph Extraction -- fire-and-forget.
+                spawn_extraction_task(
+                    final_segment.text.clone(),
+                    final_segment
+                        .speaker_label
+                        .clone()
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    final_segment.id.clone(),
+                    final_segment.start_time,
+                    &llm_engine,
+                    &api_client,
+                    &mistralrs_engine,
+                    &llm_provider,
+                    &graph_extractor,
+                    &knowledge_graph,
+                    &graph_snapshot,
+                    &pipeline_status,
+                    &app_handle,
+                    &extraction_count,
+                    &graph_update_count,
+                );
+            }
+            DeepgramEvent::Error { message } => {
+                log::warn!("Deepgram event receiver: error: {message}");
+                if let Ok(mut status) = pipeline_status.write() {
+                    status.asr = StageStatus::Error {
+                        message: format!("Deepgram error: {message}"),
+                    };
+                }
+            }
+            DeepgramEvent::Disconnected => {
+                log::info!("Deepgram event receiver: disconnected");
+                break;
+            }
+            DeepgramEvent::Connected => {
+                log::debug!("Deepgram event receiver: connected event received");
+            }
+        }
+    }
+
+    log::info!(
+        "Deepgram event receiver: exiting. ASR segments={}, diarized={}",
+        asr_count,
+        diarization_count,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AssemblyAI streaming speech processor
+// ---------------------------------------------------------------------------
+
+/// AssemblyAI streaming speech processor — connects to the AssemblyAI real-time
+/// WebSocket API, streams audio, and processes transcript events through the
+/// same downstream pipeline (diarization, storage, events, extraction).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_assemblyai_speech_processor(
+    processed_rx: Receiver<ProcessedAudioChunk>,
+    is_transcribing: Arc<AtomicBool>,
+    transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
+    pipeline_status: Arc<RwLock<PipelineStatus>>,
+    app_handle: AppHandle,
+    knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
+    graph_snapshot: Arc<RwLock<GraphSnapshot>>,
+    graph_extractor: Arc<RuleBasedExtractor>,
+    llm_engine: Arc<Mutex<Option<LlmEngine>>>,
+    api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
+    models_dir: PathBuf,
+    llm_provider: LlmProvider,
+    assemblyai_config: crate::asr::assemblyai::AssemblyAIConfig,
+) {
+    use crate::asr::assemblyai::AssemblyAIClient;
+
+    // Create and connect the AssemblyAI client.
+    let mut client = AssemblyAIClient::new(assemblyai_config);
+    match client.connect() {
+        Ok(()) => {
+            log::info!("AssemblyAI streaming: connected successfully");
+        }
+        Err(e) => {
+            log::error!("AssemblyAI streaming: failed to connect: {e}");
+            if let Ok(mut status) = pipeline_status.write() {
+                status.asr = StageStatus::Error {
+                    message: format!("AssemblyAI connect failed: {e}"),
+                };
+            }
+            return;
+        }
+    }
+
+    let event_rx = client.event_rx();
+
+    // Spawn the AssemblyAI event receiver thread (processes transcript results).
+    let is_transcribing_rx = is_transcribing.clone();
+    let _receiver_handle = std::thread::Builder::new()
+        .name("assemblyai-event-rx".to_string())
+        .spawn({
+            let transcript_buffer = transcript_buffer.clone();
+            let transcript_writer = transcript_writer.clone();
+            let pipeline_status = pipeline_status.clone();
+            let app_handle = app_handle.clone();
+            let knowledge_graph = knowledge_graph.clone();
+            let graph_snapshot = graph_snapshot.clone();
+            let graph_extractor = graph_extractor.clone();
+            let llm_engine = llm_engine.clone();
+            let api_client = api_client.clone();
+            let mistralrs_engine = mistralrs_engine.clone();
+            let llm_provider = llm_provider.clone();
+            let models_dir = models_dir.clone();
+
+            move || {
+                run_assemblyai_event_receiver(
+                    event_rx,
+                    is_transcribing_rx,
+                    transcript_buffer,
+                    transcript_writer,
+                    pipeline_status,
+                    app_handle,
+                    knowledge_graph,
+                    graph_snapshot,
+                    graph_extractor,
+                    llm_engine,
+                    api_client,
+                    mistralrs_engine,
+                    models_dir,
+                    llm_provider,
+                );
+            }
+        });
+
+    // Mark ASR as running.
+    if let Ok(mut status) = pipeline_status.write() {
+        status.asr = StageStatus::Running { processed_count: 0 };
+    }
+
+    // Audio sender loop: reads chunks and forwards to AssemblyAI.
+    log::info!("AssemblyAI streaming: entering audio sender loop");
+    let mut chunks_sent: u64 = 0;
+
+    loop {
+        let chunk = match processed_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(chunk) => chunk,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !is_transcribing.load(Ordering::Relaxed) {
+                    log::info!("AssemblyAI streaming: is_transcribing flag cleared, exiting sender");
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                log::info!("AssemblyAI streaming: audio channel disconnected, exiting sender");
+                break;
+            }
+        };
+
+        if !is_transcribing.load(Ordering::Relaxed) {
+            log::info!("AssemblyAI streaming: is_transcribing flag cleared, exiting sender");
+            break;
+        }
+
+        if !client.is_connected() {
+            log::warn!("AssemblyAI streaming: client disconnected, exiting sender");
+            break;
+        }
+
+        // Send audio directly to AssemblyAI (no accumulation needed).
+        if let Err(e) = client.send_audio(&chunk.data) {
+            log::warn!("AssemblyAI streaming: failed to send audio: {e}");
+            break;
+        }
+
+        chunks_sent += 1;
+        if chunks_sent % 100 == 0 {
+            log::debug!("AssemblyAI streaming: sent {} audio chunks", chunks_sent);
+        }
+    }
+
+    // Disconnect the client.
+    client.disconnect();
+
+    log::info!(
+        "AssemblyAI streaming: audio sender exiting. Chunks sent={}",
+        chunks_sent
+    );
+}
+
+/// AssemblyAI event receiver thread — processes transcript events from the
+/// AssemblyAI WebSocket and feeds them into the diarization + storage + events
+/// + extraction pipeline (same downstream path as Deepgram).
+#[allow(clippy::too_many_arguments)]
+fn run_assemblyai_event_receiver(
+    event_rx: crossbeam_channel::Receiver<crate::asr::assemblyai::AssemblyAIEvent>,
+    is_transcribing: Arc<AtomicBool>,
+    transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
+    pipeline_status: Arc<RwLock<PipelineStatus>>,
+    app_handle: AppHandle,
+    knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
+    graph_snapshot: Arc<RwLock<GraphSnapshot>>,
+    graph_extractor: Arc<RuleBasedExtractor>,
+    llm_engine: Arc<Mutex<Option<LlmEngine>>>,
+    api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
+    models_dir: PathBuf,
+    llm_provider: LlmProvider,
+) {
+    use crate::asr::assemblyai::AssemblyAIEvent;
+    use crate::diarization::{DiarizationInput, DiarizationWorker, DiarizedTranscript};
+
+    let diarization_config = make_diarization_config(&models_dir);
+    let (dummy_diar_tx, _dummy_diar_rx) = crossbeam_channel::unbounded::<DiarizedTranscript>();
+    let mut diarization_worker = DiarizationWorker::new(diarization_config, dummy_diar_tx);
+
+    let mut asr_count: u64 = 0;
+    let mut diarization_count: u64 = 0;
+    let extraction_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let graph_update_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    // Track cumulative time offset for segments (AssemblyAI does not provide
+    // absolute timestamps in the same way Deepgram does).
+    let session_start = std::time::Instant::now();
+
+    log::info!("AssemblyAI event receiver: entering processing loop");
+
+    loop {
+        let event = match event_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(ev) => ev,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !is_transcribing.load(Ordering::Relaxed) {
+                    log::info!("AssemblyAI event receiver: is_transcribing flag cleared, exiting");
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                log::info!("AssemblyAI event receiver: event channel disconnected, exiting");
+                break;
+            }
+        };
+
+        if !is_transcribing.load(Ordering::Relaxed) {
+            log::info!("AssemblyAI event receiver: is_transcribing flag cleared, exiting");
+            break;
+        }
+
+        match event {
+            AssemblyAIEvent::FinalTranscript { text, confidence } => {
+                asr_count += 1;
+
+                let now_secs = session_start.elapsed().as_secs_f64();
+                // Approximate segment timing from session clock.
+                let start_time = now_secs;
+                let end_time = now_secs;
+
+                let segment = TranscriptSegment {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    source_id: "assemblyai-stream".to_string(),
+                    speaker_id: None,
+                    speaker_label: None,
+                    text: text.clone(),
+                    start_time,
+                    end_time,
+                    confidence: confidence as f32,
+                };
+
+                // Run through local diarization with empty audio (assigns
+                // a default speaker when no audio signal is available).
+                let input = DiarizationInput {
+                    transcript: segment.clone(),
+                    speech_audio: vec![],
+                    speech_start_time: Duration::from_secs_f64(start_time),
+                    speech_end_time: Duration::from_secs_f64(end_time),
+                };
+                let diarized = diarization_worker.process_input(input);
+                diarization_count += 1;
+
+                let _ = app_handle.emit(events::SPEAKER_DETECTED, &diarized.speaker_info);
+                let final_segment = diarized.segment;
+
+                // Store in transcript buffer + persist to disk.
+                if let Ok(mut buffer) = transcript_buffer.write() {
+                    buffer.push_back(final_segment.clone());
+                    if buffer.len() > 500 {
+                        buffer.pop_front();
+                    }
+                }
+                if let Ok(writer_guard) = transcript_writer.lock() {
+                    if let Some(ref writer) = *writer_guard {
+                        writer.append(&final_segment);
+                    }
+                }
+
+                // Emit Tauri events.
+                let _ = app_handle.emit(events::TRANSCRIPT_UPDATE, &final_segment);
+
+                // Update pipeline status.
+                if let Ok(mut status) = pipeline_status.write() {
+                    status.asr = StageStatus::Running {
+                        processed_count: asr_count,
+                    };
+                    status.diarization = StageStatus::Running {
+                        processed_count: diarization_count,
+                    };
+                }
+
+                log::debug!(
+                    "AssemblyAI event receiver: emitted transcript #{} speaker={:?} \"{}\"",
+                    asr_count,
+                    final_segment.speaker_label,
+                    &final_segment.text,
+                );
+
+                // Knowledge Graph Extraction -- fire-and-forget.
+                spawn_extraction_task(
+                    final_segment.text.clone(),
+                    final_segment
+                        .speaker_label
+                        .clone()
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    final_segment.id.clone(),
+                    final_segment.start_time,
+                    &llm_engine,
+                    &api_client,
+                    &mistralrs_engine,
+                    &llm_provider,
+                    &graph_extractor,
+                    &knowledge_graph,
+                    &graph_snapshot,
+                    &pipeline_status,
+                    &app_handle,
+                    &extraction_count,
+                    &graph_update_count,
+                );
+            }
+            AssemblyAIEvent::PartialTranscript { text } => {
+                log::debug!("AssemblyAI: interim transcript: \"{}\"", &text);
+            }
+            AssemblyAIEvent::Error { message } => {
+                log::warn!("AssemblyAI event receiver: error: {message}");
+                if let Ok(mut status) = pipeline_status.write() {
+                    status.asr = StageStatus::Error {
+                        message: format!("AssemblyAI error: {message}"),
+                    };
+                }
+            }
+            AssemblyAIEvent::SessionTerminated => {
+                log::info!("AssemblyAI event receiver: session terminated");
+                break;
+            }
+        }
+    }
+
+    log::info!(
+        "AssemblyAI event receiver: exiting. ASR segments={}, diarized={}",
+        asr_count,
+        diarization_count,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AWS Transcribe streaming speech processor
+// ---------------------------------------------------------------------------
+
+pub(crate) fn run_aws_transcribe_speech_processor(
+    processed_rx: Receiver<ProcessedAudioChunk>,
+    is_transcribing: Arc<AtomicBool>,
+    transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
+    pipeline_status: Arc<RwLock<PipelineStatus>>,
+    app_handle: AppHandle,
+    knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
+    graph_snapshot: Arc<RwLock<GraphSnapshot>>,
+    graph_extractor: Arc<RuleBasedExtractor>,
+    llm_engine: Arc<Mutex<Option<LlmEngine>>>,
+    api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
+    models_dir: PathBuf,
+    llm_provider: LlmProvider,
+    aws_config: crate::asr::aws_transcribe::AwsTranscribeConfig,
+) {
+    let diarization_config = make_diarization_config(&models_dir);
+    let (dummy_diar_tx, _dummy_diar_rx) = crossbeam_channel::unbounded::<DiarizedTranscript>();
+    let mut diarization_worker = DiarizationWorker::new(diarization_config, dummy_diar_tx);
+
+    let mut asr_count: u64 = 0;
+    let mut diarization_count: u64 = 0;
+    let extraction_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let graph_update_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    if let Ok(mut status) = pipeline_status.write() {
+        status.asr = StageStatus::Running { processed_count: 0 };
+    }
+
+    log::info!("AWS Transcribe speech processor: starting streaming session");
+
+    let pipeline_status_err = pipeline_status.clone();
+    let result = crate::asr::aws_transcribe::run_aws_transcribe_session(
+        processed_rx,
+        is_transcribing,
+        aws_config,
+        move |transcript| {
+            asr_count += 1;
+
+            let input = DiarizationInput {
+                transcript,
+                speech_audio: vec![],
+                speech_start_time: Duration::ZERO,
+                speech_end_time: Duration::ZERO,
+            };
+            let diarized = diarization_worker.process_input(input);
+            diarization_count += 1;
+
+            if let Ok(mut buffer) = transcript_buffer.write() {
+                buffer.push_back(diarized.segment.clone());
+                if buffer.len() > 500 {
+                    buffer.pop_front();
+                }
+            }
+            if let Ok(writer_guard) = transcript_writer.lock() {
+                if let Some(ref writer) = *writer_guard {
+                    writer.append(&diarized.segment);
+                }
+            }
+
+            let _ = app_handle.emit(events::TRANSCRIPT_UPDATE, &diarized.segment);
+            let _ = app_handle.emit(events::SPEAKER_DETECTED, &diarized.speaker_info);
+
+            if let Ok(mut status) = pipeline_status.write() {
+                status.asr = StageStatus::Running {
+                    processed_count: asr_count,
+                };
+                status.diarization = StageStatus::Running {
+                    processed_count: diarization_count,
+                };
+            }
+
+            spawn_extraction_task(
+                diarized.segment.text.clone(),
+                diarized
+                    .segment
+                    .speaker_label
+                    .clone()
+                    .unwrap_or_else(|| "Unknown".to_string()),
+                diarized.segment.id.clone(),
+                diarized.segment.start_time,
+                &llm_engine,
+                &api_client,
+                &mistralrs_engine,
+                &llm_provider,
+                &graph_extractor,
+                &knowledge_graph,
+                &graph_snapshot,
+                &pipeline_status,
+                &app_handle,
+                &extraction_count,
+                &graph_update_count,
+            );
+        },
+    );
+
+    if let Err(e) = result {
+        log::error!("AWS Transcribe session error: {}", e);
+        if let Ok(mut status) = pipeline_status_err.write() {
+            status.asr = StageStatus::Error { message: e };
+        }
+    }
+
+    log::info!("AWS Transcribe speech processor: session ended");
+}
+
+// ---------------------------------------------------------------------------
 // AccumulatedSegment → ASR bridge
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Sherpa-onnx streaming ASR speech processor
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "sherpa-streaming")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_sherpa_onnx_speech_processor(
+    processed_rx: Receiver<ProcessedAudioChunk>,
+    is_transcribing: Arc<AtomicBool>,
+    transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    transcript_writer: Arc<Mutex<Option<crate::persistence::TranscriptWriter>>>,
+    pipeline_status: Arc<RwLock<PipelineStatus>>,
+    app_handle: AppHandle,
+    knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
+    graph_snapshot: Arc<RwLock<GraphSnapshot>>,
+    graph_extractor: Arc<RuleBasedExtractor>,
+    llm_engine: Arc<Mutex<Option<LlmEngine>>>,
+    api_client: Arc<Mutex<Option<ApiClient>>>,
+    mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
+    models_dir: PathBuf,
+    llm_provider: LlmProvider,
+    sherpa_config: crate::asr::sherpa_streaming::SherpaStreamingConfig,
+) {
+    use crate::asr::sherpa_streaming::SherpaStreamingWorker;
+    use crate::diarization::{DiarizationInput, DiarizationWorker, DiarizedTranscript};
+
+    let mut worker = match SherpaStreamingWorker::new(&sherpa_config) {
+        Ok(w) => w,
+        Err(e) => {
+            log::error!("Sherpa-onnx streaming: failed to create worker: {e}");
+            if let Ok(mut status) = pipeline_status.write() {
+                status.asr = StageStatus::Error {
+                    message: format!("Sherpa-onnx init failed: {e}"),
+                };
+            }
+            run_speech_processor_diarization_only(
+                processed_rx, is_transcribing, transcript_buffer, transcript_writer,
+                pipeline_status, app_handle, knowledge_graph, graph_snapshot,
+                graph_extractor, llm_engine, api_client, mistralrs_engine, models_dir, llm_provider,
+            );
+            return;
+        }
+    };
+
+    let diarization_config = make_diarization_config(&models_dir);
+    let (dummy_diar_tx, _dummy_diar_rx) = crossbeam_channel::unbounded::<DiarizedTranscript>();
+    let mut diarization_worker = DiarizationWorker::new(diarization_config, dummy_diar_tx);
+
+    let mut asr_count: u64 = 0;
+    let mut diarization_count: u64 = 0;
+    let extraction_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let graph_update_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let session_start = std::time::Instant::now();
+    let mut utterance_start = std::time::Instant::now();
+
+    if let Ok(mut status) = pipeline_status.write() {
+        status.asr = StageStatus::Running { processed_count: 0 };
+    }
+
+    log::info!("Sherpa-onnx streaming: entering processing loop");
+    let mut chunks_processed: u64 = 0;
+
+    loop {
+        let chunk = match processed_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(chunk) => chunk,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if !is_transcribing.load(Ordering::Relaxed) {
+                    log::info!("Sherpa-onnx streaming: is_transcribing flag cleared, exiting");
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                log::info!("Sherpa-onnx streaming: audio channel disconnected, exiting");
+                break;
+            }
+        };
+
+        if !is_transcribing.load(Ordering::Relaxed) {
+            log::info!("Sherpa-onnx streaming: is_transcribing flag cleared, exiting");
+            break;
+        }
+
+        chunks_processed += 1;
+
+        if let Some((text, is_endpoint)) = worker.process_chunk(&chunk.data) {
+            if is_endpoint {
+                asr_count += 1;
+                let end_time = session_start.elapsed().as_secs_f64();
+                let start_time = end_time - utterance_start.elapsed().as_secs_f64();
+                utterance_start = std::time::Instant::now();
+
+                let segment = TranscriptSegment {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    source_id: chunk.source_id.clone(),
+                    speaker_id: None,
+                    speaker_label: None,
+                    text: text.clone(),
+                    start_time,
+                    end_time,
+                    confidence: 0.9,
+                };
+
+                let input = DiarizationInput {
+                    transcript: segment,
+                    speech_audio: vec![],
+                    speech_start_time: Duration::from_secs_f64(start_time),
+                    speech_end_time: Duration::from_secs_f64(end_time),
+                };
+                let diarized = diarization_worker.process_input(input);
+                diarization_count += 1;
+
+                let _ = app_handle.emit(events::SPEAKER_DETECTED, &diarized.speaker_info);
+                let final_segment = diarized.segment;
+
+                if let Ok(mut buffer) = transcript_buffer.write() {
+                    buffer.push_back(final_segment.clone());
+                    if buffer.len() > 500 { buffer.pop_front(); }
+                }
+                if let Ok(writer_guard) = transcript_writer.lock() {
+                    if let Some(ref writer) = *writer_guard { writer.append(&final_segment); }
+                }
+
+                let _ = app_handle.emit(events::TRANSCRIPT_UPDATE, &final_segment);
+
+                if let Ok(mut status) = pipeline_status.write() {
+                    status.asr = StageStatus::Running { processed_count: asr_count };
+                    status.diarization = StageStatus::Running { processed_count: diarization_count };
+                }
+
+                log::debug!(
+                    "Sherpa-onnx streaming: emitted transcript #{} speaker={:?} \"{}\"",
+                    asr_count, final_segment.speaker_label, &final_segment.text,
+                );
+
+                spawn_extraction_task(
+                    final_segment.text.clone(),
+                    final_segment.speaker_label.clone().unwrap_or_else(|| "Unknown".to_string()),
+                    final_segment.id.clone(),
+                    final_segment.start_time,
+                    &llm_engine, &api_client, &mistralrs_engine, &llm_provider, &graph_extractor,
+                    &knowledge_graph, &graph_snapshot, &pipeline_status, &app_handle,
+                    &extraction_count, &graph_update_count,
+                );
+            }
+        }
+
+        if chunks_processed % 500 == 0 {
+            log::debug!(
+                "Sherpa-onnx streaming: processed {} chunks, {} transcripts",
+                chunks_processed, asr_count
+            );
+        }
+    }
+
+    log::info!(
+        "Sherpa-onnx streaming: exiting. Chunks={}, ASR={}, diarized={}",
+        chunks_processed, asr_count, diarization_count,
+    );
+}
 
 impl AccumulatedSegment {
     /// Convert an `AccumulatedSegment` into the `SpeechSegment` type expected

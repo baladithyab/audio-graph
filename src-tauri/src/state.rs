@@ -22,7 +22,7 @@ use crate::graph::entities::GraphSnapshot;
 use crate::graph::extraction::RuleBasedExtractor;
 use crate::graph::temporal::TemporalKnowledgeGraph;
 use crate::llm::engine::ChatMessage;
-use crate::llm::{ApiClient, LlmEngine};
+use crate::llm::{ApiClient, LlmEngine, MistralRsEngine};
 use crate::persistence::TranscriptWriter;
 
 /// Transcript segment for frontend consumption.
@@ -106,6 +106,9 @@ pub struct AppState {
 
     /// OpenAI-compatible API client (alternative to native LLM).
     pub api_client: Arc<Mutex<Option<ApiClient>>>,
+
+    /// mistral.rs engine for entity extraction + chat (Candle backend).
+    pub mistralrs_engine: Arc<Mutex<Option<MistralRsEngine>>>,
 
     /// Chat message history for the sidebar.
     pub chat_history: Arc<RwLock<Vec<ChatMessage>>>,
@@ -210,6 +213,7 @@ impl AppState {
             graph_extractor: Arc::new(RuleBasedExtractor::new()),
             llm_engine: Arc::new(Mutex::new(None)),
             api_client: Arc::new(Mutex::new(None)),
+            mistralrs_engine: Arc::new(Mutex::new(None)),
             chat_history: Arc::new(RwLock::new(Vec::new())),
             capture_manager: Arc::new(Mutex::new(AudioCaptureManager::new())),
             pipeline_tx,

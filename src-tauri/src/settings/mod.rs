@@ -9,10 +9,50 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 // ---------------------------------------------------------------------------
+// Helper default functions
+// ---------------------------------------------------------------------------
+
+fn default_aws_region() -> String {
+    "us-east-1".to_string()
+}
+fn default_language_code() -> String {
+    "en-US".to_string()
+}
+fn default_deepgram_model() -> String {
+    "nova-3".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_sherpa_model() -> String {
+    "streaming-zipformer-en-20M".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// AWS credential source
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AwsCredentialSource {
+    #[serde(rename = "default_chain")]
+    DefaultChain,
+    #[serde(rename = "profile")]
+    Profile { name: String },
+    #[serde(rename = "access_keys")]
+    AccessKeys { access_key: String },
+}
+
+impl Default for AwsCredentialSource {
+    fn default() -> Self {
+        Self::DefaultChain
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ASR provider
 // ---------------------------------------------------------------------------
 
-/// ASR provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AsrProvider {
@@ -23,6 +63,38 @@ pub enum AsrProvider {
         endpoint: String,
         api_key: String,
         model: String,
+    },
+    #[serde(rename = "aws_transcribe")]
+    AwsTranscribe {
+        #[serde(default = "default_aws_region")]
+        region: String,
+        #[serde(default = "default_language_code")]
+        language_code: String,
+        #[serde(default)]
+        credential_source: AwsCredentialSource,
+        #[serde(default = "default_true")]
+        enable_diarization: bool,
+    },
+    #[serde(rename = "deepgram")]
+    DeepgramStreaming {
+        api_key: String,
+        #[serde(default = "default_deepgram_model")]
+        model: String,
+        #[serde(default = "default_true")]
+        enable_diarization: bool,
+    },
+    #[serde(rename = "assemblyai")]
+    AssemblyAI {
+        api_key: String,
+        #[serde(default = "default_true")]
+        enable_diarization: bool,
+    },
+    #[serde(rename = "sherpa_onnx")]
+    SherpaOnnx {
+        #[serde(default = "default_sherpa_model")]
+        model_dir: String,
+        #[serde(default = "default_true")]
+        enable_endpoint_detection: bool,
     },
 }
 
@@ -36,7 +108,6 @@ impl Default for AsrProvider {
 // LLM API config
 // ---------------------------------------------------------------------------
 
-/// LLM API configuration (mirrors llm/api_client.rs ApiConfig for persistence)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmApiConfig {
     pub endpoint: String,
@@ -60,7 +131,6 @@ fn default_temperature() -> f32 {
 // LLM provider
 // ---------------------------------------------------------------------------
 
-/// LLM provider configuration — local LFM2-350M GGUF model vs API endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum LlmProvider {
@@ -72,6 +142,23 @@ pub enum LlmProvider {
         api_key: String,
         model: String,
     },
+    #[serde(rename = "aws_bedrock")]
+    AwsBedrock {
+        #[serde(default = "default_aws_region")]
+        region: String,
+        model_id: String,
+        #[serde(default)]
+        credential_source: AwsCredentialSource,
+    },
+    #[serde(rename = "mistralrs")]
+    MistralRs {
+        #[serde(default = "default_mistralrs_model")]
+        model_id: String,
+    },
+}
+
+fn default_mistralrs_model() -> String {
+    "ggml-small-extract.gguf".to_string()
 }
 
 impl Default for LlmProvider {
@@ -88,7 +175,6 @@ impl Default for LlmProvider {
 // Audio settings
 // ---------------------------------------------------------------------------
 
-/// Audio processing settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioSettings {
     #[serde(default = "default_sample_rate")]
@@ -114,16 +200,35 @@ impl Default for AudioSettings {
 }
 
 // ---------------------------------------------------------------------------
-// Gemini settings
+// Gemini auth mode + settings
 // ---------------------------------------------------------------------------
 
-/// Gemini Live API configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum GeminiAuthMode {
+    #[serde(rename = "api_key")]
+    ApiKey { api_key: String },
+    #[serde(rename = "vertex_ai")]
+    VertexAI {
+        project_id: String,
+        location: String,
+        #[serde(default)]
+        service_account_path: Option<String>,
+    },
+}
+
+impl Default for GeminiAuthMode {
+    fn default() -> Self {
+        Self::ApiKey {
+            api_key: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiSettings {
-    /// Gemini API key (required).
     #[serde(default)]
-    pub api_key: String,
-    /// Model identifier (e.g., "gemini-2.0-flash-live").
+    pub auth: GeminiAuthMode,
     #[serde(default = "default_gemini_model")]
     pub model: String,
 }
@@ -135,8 +240,18 @@ fn default_gemini_model() -> String {
 impl Default for GeminiSettings {
     fn default() -> Self {
         Self {
-            api_key: String::new(),
+            auth: GeminiAuthMode::default(),
             model: default_gemini_model(),
+        }
+    }
+}
+
+impl GeminiSettings {
+    /// Extract the API key from auth mode (convenience for backward compat).
+    pub fn api_key(&self) -> String {
+        match &self.auth {
+            GeminiAuthMode::ApiKey { api_key } => api_key.clone(),
+            GeminiAuthMode::VertexAI { .. } => String::new(),
         }
     }
 }
@@ -145,11 +260,12 @@ impl Default for GeminiSettings {
 // Top-level settings
 // ---------------------------------------------------------------------------
 
-/// Top-level application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub asr_provider: AsrProvider,
+    #[serde(default = "default_whisper_model")]
+    pub whisper_model: String,
     #[serde(default)]
     pub llm_provider: LlmProvider,
     #[serde(default)]
@@ -160,10 +276,15 @@ pub struct AppSettings {
     pub gemini: GeminiSettings,
 }
 
+fn default_whisper_model() -> String {
+    "ggml-small.en.bin".to_string()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             asr_provider: AsrProvider::default(),
+            whisper_model: default_whisper_model(),
             llm_provider: LlmProvider::default(),
             llm_api_config: None,
             audio_settings: AudioSettings::default(),
@@ -176,7 +297,6 @@ impl Default for AppSettings {
 // Path resolution
 // ---------------------------------------------------------------------------
 
-/// Get the path to the settings JSON file
 pub fn get_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let data_dir = app
         .path()
@@ -189,7 +309,6 @@ pub fn get_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 // Load / Save
 // ---------------------------------------------------------------------------
 
-/// Load settings from disk, returning defaults if file doesn't exist or is invalid
 pub fn load_settings(app: &tauri::AppHandle) -> AppSettings {
     match get_settings_path(app) {
         Ok(path) => {
@@ -222,11 +341,9 @@ pub fn load_settings(app: &tauri::AppHandle) -> AppSettings {
     }
 }
 
-/// Save settings to disk (atomic write: write to tmp then rename)
 pub fn save_settings(app: &tauri::AppHandle, settings: &AppSettings) -> Result<(), String> {
     let path = get_settings_path(app)?;
 
-    // Ensure parent directory exists
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create settings directory: {}", e))?;
@@ -235,10 +352,10 @@ pub fn save_settings(app: &tauri::AppHandle, settings: &AppSettings) -> Result<(
     let json = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-    // Atomic write: write to temp file, then rename
     let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, &json).map_err(|e| format!("Failed to write settings file: {}", e))?;
-    fs::rename(&tmp_path, &path).map_err(|e| format!("Failed to finalize settings file: {}", e))?;
+    fs::rename(&tmp_path, &path)
+        .map_err(|e| format!("Failed to finalize settings file: {}", e))?;
 
     log::info!("Settings saved to {}", path.display());
     Ok(())

@@ -12,6 +12,13 @@ use log::{debug, error, info, warn};
 use uuid::Uuid;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+pub mod assemblyai;
+pub mod aws_transcribe;
+pub mod cloud;
+pub mod deepgram;
+#[cfg(feature = "sherpa-streaming")]
+pub mod sherpa_streaming;
+
 use crate::state::TranscriptSegment;
 
 /// A segment of speech audio ready for ASR transcription.
@@ -52,6 +59,16 @@ impl AsrConfig {
     pub fn with_models_dir(models_dir: &Path) -> Self {
         Self {
             model_path: models_dir.join("ggml-small.en.bin"),
+            language: "en".to_string(),
+            n_threads: 4,
+            temperature: 0.0,
+            beam_size: 5,
+        }
+    }
+
+    pub fn with_models_dir_and_model(models_dir: &Path, model_filename: &str) -> Self {
+        Self {
+            model_path: models_dir.join(model_filename),
             language: "en".to_string(),
             n_threads: 4,
             temperature: 0.0,

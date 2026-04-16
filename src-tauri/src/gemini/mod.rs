@@ -71,8 +71,8 @@ pub enum GeminiEvent {
 /// Configuration for a Gemini Live session.
 #[derive(Debug, Clone)]
 pub struct GeminiConfig {
-    /// Gemini API key.
-    pub api_key: String,
+    /// Authentication mode (API key or Vertex AI with bearer token).
+    pub auth: crate::settings::GeminiAuthMode,
     /// Model name (e.g. `"gemini-3.1-flash-live-preview"`).
     pub model: String,
 }
@@ -163,9 +163,22 @@ impl GeminiLiveClient {
     /// been received, then spawns background reader and writer tasks on an
     /// internal tokio runtime.
     pub fn connect(&mut self) -> Result<(), String> {
-        if self.config.api_key.is_empty() {
-            return Err("Gemini API key is not configured".to_string());
+        // Validate auth configuration before proceeding.
+        match &self.config.auth {
+            crate::settings::GeminiAuthMode::ApiKey { api_key } => {
+                if api_key.is_empty() {
+                    return Err("Gemini API key is not configured".to_string());
+                }
+            }
+            crate::settings::GeminiAuthMode::VertexAI { project_id, location, .. } => {
+                if project_id.is_empty() || location.is_empty() {
+                    return Err(
+                        "Vertex AI project_id and location must be configured".to_string(),
+                    );
+                }
+            }
         }
+
         // Build a dedicated single-threaded tokio runtime for the WebSocket.
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -174,13 +187,7 @@ impl GeminiLiveClient {
             .build()
             .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
 
-        let url_str = format!(
-            "wss://generativelanguage.googleapis.com/ws/\
-             google.ai.generativelanguage.v1beta.\
-             GenerativeService.BidiGenerateContent?key={}",
-            self.config.api_key,
-        );
-
+        let auth = self.config.auth.clone();
         let setup_msg = build_setup_message(&self.config);
         let event_tx = self.event_tx.clone();
         let connected = Arc::clone(&self.connected);
@@ -189,9 +196,64 @@ impl GeminiLiveClient {
         // Perform the blocking connect + setup handshake inside the runtime.
         let (audio_tx, reader_handle, writer_handle) = rt.block_on(async move {
             // ── Open WebSocket ─────────────────────────────────────────
-            let (ws_stream, _response) = connect_async(&url_str)
-                .await
-                .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+            let (ws_stream, _response) = match &auth {
+                crate::settings::GeminiAuthMode::ApiKey { api_key } => {
+                    let url_str = format!(
+                        "wss://generativelanguage.googleapis.com/ws/\
+                         google.ai.generativelanguage.v1beta.\
+                         GenerativeService.BidiGenerateContent?key={}",
+                        api_key,
+                    );
+                    connect_async(&url_str)
+                        .await
+                        .map_err(|e| format!("WebSocket connect failed: {e}"))?
+                }
+                crate::settings::GeminiAuthMode::VertexAI {
+                    project_id,
+                    location,
+                    service_account_path,
+                } => {
+                    // Optionally set GOOGLE_APPLICATION_CREDENTIALS for
+                    // explicit service-account key file.
+                    if let Some(sa_path) = service_account_path.as_deref() {
+                        if !sa_path.is_empty() {
+                            std::env::set_var(
+                                "GOOGLE_APPLICATION_CREDENTIALS",
+                                sa_path,
+                            );
+                        }
+                    }
+
+                    let provider = gcp_auth::provider()
+                        .await
+                        .map_err(|e| format!("GCP auth provider init failed: {e}"))?;
+                    let token = provider
+                        .token(&["https://www.googleapis.com/auth/cloud-platform"])
+                        .await
+                        .map_err(|e| format!("Failed to obtain GCP bearer token: {e}"))?;
+
+                    let url_str = format!(
+                        "wss://{location}-aiplatform.googleapis.com/ws/\
+                         google.cloud.aiplatform.v1beta1.\
+                         LlmBidiService/BidiGenerateContent?\
+                         alt=proto&key={project_id}",
+                    );
+
+                    let request = tungstenite::http::Request::builder()
+                        .uri(&url_str)
+                        .header(
+                            "Authorization",
+                            format!("Bearer {}", token.as_str()),
+                        )
+                        .header("Content-Type", "application/json")
+                        .body(())
+                        .map_err(|e| format!("Failed to build WebSocket request: {e}"))?;
+
+                    connect_async(request)
+                        .await
+                        .map_err(|e| format!("WebSocket connect failed: {e}"))?
+                }
+            };
 
             let (mut writer, reader) = ws_stream.split();
 
@@ -347,9 +409,21 @@ impl Drop for GeminiLiveClient {
 
 /// Build the `BidiGenerateContentSetup` JSON message.
 fn build_setup_message(config: &GeminiConfig) -> Value {
+    let model_path = match &config.auth {
+        crate::settings::GeminiAuthMode::ApiKey { .. } => {
+            format!("models/{}", config.model)
+        }
+        crate::settings::GeminiAuthMode::VertexAI { project_id, location, .. } => {
+            format!(
+                "projects/{}/locations/{}/publishers/google/models/{}",
+                project_id, location, config.model,
+            )
+        }
+    };
+
     json!({
         "setup": {
-            "model": format!("models/{}", config.model),
+            "model": model_path,
             "generationConfig": {
                 "responseModalities": ["TEXT"],
                 "inputAudioTranscription": {}
@@ -618,9 +692,11 @@ mod tests {
     }
 
     #[test]
-    fn setup_message_structure() {
+    fn setup_message_structure_api_key() {
         let config = GeminiConfig {
-            api_key: "test-key".into(),
+            auth: crate::settings::GeminiAuthMode::ApiKey {
+                api_key: "test-key".into(),
+            },
             model: "gemini-3.1-flash-live-preview".into(),
         };
         let msg = build_setup_message(&config);
@@ -635,6 +711,24 @@ mod tests {
         );
         assert!(
             msg["setup"]["generationConfig"]["inputAudioTranscription"].is_object()
+        );
+    }
+
+    #[test]
+    fn setup_message_structure_vertex_ai() {
+        let config = GeminiConfig {
+            auth: crate::settings::GeminiAuthMode::VertexAI {
+                project_id: "my-project".into(),
+                location: "us-central1".into(),
+                service_account_path: None,
+            },
+            model: "gemini-3.1-flash-live-preview".into(),
+        };
+        let msg = build_setup_message(&config);
+
+        assert_eq!(
+            msg["setup"]["model"],
+            "projects/my-project/locations/us-central1/publishers/google/models/gemini-3.1-flash-live-preview"
         );
     }
 
@@ -665,7 +759,9 @@ mod tests {
     #[test]
     fn client_new_is_disconnected() {
         let client = GeminiLiveClient::new(GeminiConfig {
-            api_key: "key".into(),
+            auth: crate::settings::GeminiAuthMode::ApiKey {
+                api_key: "key".into(),
+            },
             model: "model".into(),
         });
         assert!(!client.is_connected());
@@ -674,7 +770,9 @@ mod tests {
     #[test]
     fn connect_fails_without_api_key() {
         let mut client = GeminiLiveClient::new(GeminiConfig {
-            api_key: String::new(),
+            auth: crate::settings::GeminiAuthMode::ApiKey {
+                api_key: String::new(),
+            },
             model: "model".into(),
         });
         let result = client.connect();
@@ -683,9 +781,26 @@ mod tests {
     }
 
     #[test]
+    fn connect_fails_without_vertex_config() {
+        let mut client = GeminiLiveClient::new(GeminiConfig {
+            auth: crate::settings::GeminiAuthMode::VertexAI {
+                project_id: String::new(),
+                location: String::new(),
+                service_account_path: None,
+            },
+            model: "model".into(),
+        });
+        let result = client.connect();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("project_id"));
+    }
+
+    #[test]
     fn send_audio_fails_when_disconnected() {
         let client = GeminiLiveClient::new(GeminiConfig {
-            api_key: "key".into(),
+            auth: crate::settings::GeminiAuthMode::ApiKey {
+                api_key: "key".into(),
+            },
             model: "model".into(),
         });
         let result = client.send_audio(&[0.5, -0.3]);

@@ -72,7 +72,9 @@ function ControlBar() {
   // Transcribe requires capture to be running
   const canTranscribe = isCapturing && !isTranscribing;
   // Gemini requires capture + a configured API key
-  const hasGeminiKey = Boolean(settings?.gemini?.api_key);
+  const hasGeminiKey = Boolean(
+    settings?.gemini?.auth?.type === "api_key" && settings.gemini.auth.api_key
+  ) || settings?.gemini?.auth?.type === "vertex_ai";
   const canGemini = isCapturing && !isGeminiActive && hasGeminiKey;
   const selectedLabel = selectedSources.map((s) => s.name).join(", ");
 
