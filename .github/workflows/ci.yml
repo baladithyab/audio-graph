@@ -104,8 +104,9 @@ jobs:
         run: cargo test -- --test-threads=1
 
       - name: Cargo audit
-        # Informational: surfaces advisories but does not fail CI yet.
-        continue-on-error: true
+        # Hard gate: advisories are either ignored in `.cargo/audit.toml`
+        # (with written justification) or must be resolved. Fail on any new
+        # finding — that forces a real review rather than silent drift.
         working-directory: rsac/apps/audio-graph/src-tauri
         run: |
           cargo install --locked cargo-audit || true

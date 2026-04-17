@@ -1,0 +1,45 @@
+# cargo-audit configuration
+# https://docs.rs/cargo-audit/latest/cargo_audit/config/index.html
+#
+# Ignored advisories here are reviewed and accepted — not unknown. Each entry
+# MUST have a `reason` comment explaining why the advisory can't be resolved
+# today and what unblocks it. When a new advisory appears, the default
+# behaviour (CI failure on Linux `Cargo audit` step — currently
+# continue-on-error, but intended to harden) forces a fresh review.
+
+[advisories]
+
+# RUSTSEC-2026-0098, RUSTSEC-2026-0099 — rustls-webpki 0.101.7 name-constraint
+# bypasses for URI names / wildcard certs.
+#
+# Status: accepted risk, cannot fix independently.
+# Source: transitive via aws-smithy-http-client 1.1.12 → rustls 0.21 →
+# rustls-webpki 0.101.
+# Blocker: The AWS SDK for Rust is still on rustls 0.21 in its generated
+# smithy runtime. Migrating is tracked upstream (smithy-rs is producing a
+# separate `aws-smithy-http-client-reqwest` crate as a transitional path).
+# Remediation: bump when aws-config / aws-smithy-* ship with rustls >= 0.23.
+# Re-check: run `cargo audit` after each AWS SDK minor bump.
+# Impact assessment: both advisories require an attacker-controlled cert
+# chain containing URI-name constraints or wildcard assertions to reach the
+# vulnerable cert-validation path. For audio-graph's use case (AWS API
+# endpoints signed by AWS's own CAs, Deepgram / AssemblyAI / Gemini endpoints
+# signed by public CAs), the cert chain is not attacker-controlled, so the
+# exposure surface is effectively nil.
+#
+# Unmaintained GTK3 bindings are baked into Tauri v2's Linux stack —
+# nothing to do here until Tauri migrates to GTK4.
+#
+# fxhash is unmaintained and pulled transitively via selectors / kuchikiki
+# (tauri-utils HTML scanning). Same story.
+ignore = [
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2024-0411",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0429",
+    "RUSTSEC-2025-0057",
+]
