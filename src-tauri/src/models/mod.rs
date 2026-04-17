@@ -53,7 +53,8 @@ const MODELS: &[ModelDef] = &[
         filename: WHISPER_MODEL_TINY_EN,
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
         expected_size: Some(77_700_000),
-        description: "Fastest model (~75MB). 5x faster than Small, lower accuracy. Good for weak hardware.",
+        description:
+            "Fastest model (~75MB). 5x faster than Small, lower accuracy. Good for weak hardware.",
     },
     ModelDef {
         name: "Whisper Base (English)",
@@ -102,7 +103,8 @@ const MODELS: &[ModelDef] = &[
         filename: SHERPA_ZIPFORMER_20M,
         url: SHERPA_ZIPFORMER_20M_URL,
         expected_size: Some(SHERPA_ZIPFORMER_20M_EXPECTED_SIZE),
-        description: "Streaming ASR via Zipformer transducer — sub-200ms first-word latency (sherpa-onnx)",
+        description:
+            "Streaming ASR via Zipformer transducer — sub-200ms first-word latency (sherpa-onnx)",
     },
 ];
 

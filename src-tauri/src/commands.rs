@@ -287,9 +287,7 @@ async fn aws_preflight_probe(
         // AccessKeys has a static-cred pre-flight elsewhere; probing via STS
         // here would double up. Callers already filter this case out.
         crate::settings::AwsCredentialSource::AccessKeys { .. } => {
-            return Err(
-                "aws_preflight_probe called with AccessKeys — caller bug".to_string(),
-            );
+            return Err("aws_preflight_probe called with AccessKeys — caller bug".to_string());
         }
     };
     let sts = aws_sdk_sts::Client::new(&sdk_config);
@@ -370,15 +368,14 @@ pub async fn start_transcribe(
             crate::settings::AsrProvider::DeepgramStreaming { api_key, .. } => {
                 if api_key.trim().is_empty() {
                     return Err(
-                        "Deepgram API key not set. Open Settings → ASR → Deepgram.".to_string(),
+                        "Deepgram API key not set. Open Settings → ASR → Deepgram.".to_string()
                     );
                 }
             }
             crate::settings::AsrProvider::AssemblyAI { api_key, .. } => {
                 if api_key.trim().is_empty() {
                     return Err(
-                        "AssemblyAI API key not set. Open Settings → ASR → AssemblyAI."
-                            .to_string(),
+                        "AssemblyAI API key not set. Open Settings → ASR → AssemblyAI.".to_string(),
                     );
                 }
             }
@@ -1114,10 +1111,7 @@ pub fn delete_model_cmd(app: tauri::AppHandle, model_filename: String) -> Result
 /// Both pipelines (local and Gemini) can run simultaneously since they share
 /// the same `processed_rx` channel (crossbeam receivers are cloneable).
 #[tauri::command]
-pub async fn start_gemini(
-    state: State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
+pub async fn start_gemini(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
     log::info!("start_gemini called");
 
     // Guard: capture must be running
@@ -1154,12 +1148,15 @@ pub async fn start_gemini(
         crate::settings::GeminiAuthMode::ApiKey { api_key } => {
             if api_key.is_empty() {
                 return Err(
-                    "Gemini API key is not configured. Set it in Settings → Gemini."
-                        .to_string(),
+                    "Gemini API key is not configured. Set it in Settings → Gemini.".to_string(),
                 );
             }
         }
-        crate::settings::GeminiAuthMode::VertexAI { project_id, location, .. } => {
+        crate::settings::GeminiAuthMode::VertexAI {
+            project_id,
+            location,
+            ..
+        } => {
             if project_id.is_empty() || location.is_empty() {
                 return Err(
                     "Vertex AI project_id and location must be configured in Settings → Gemini."
@@ -1208,10 +1205,7 @@ pub async fn start_gemini(
 
                     while let Ok(chunk) = gemini_rx.recv() {
                         // Check if we should stop
-                        let active = is_active
-                            .read()
-                            .map(|a| *a)
-                            .unwrap_or(false);
+                        let active = is_active.read().map(|a| *a).unwrap_or(false);
                         if !active {
                             break;
                         }
@@ -1273,10 +1267,7 @@ pub async fn start_gemini(
 
                     while let Ok(event) = event_rx.recv() {
                         // Check if we should stop
-                        let active = is_active
-                            .read()
-                            .map(|a| *a)
-                            .unwrap_or(false);
+                        let active = is_active.read().map(|a| *a).unwrap_or(false);
                         if !active {
                             break;
                         }
@@ -1284,10 +1275,7 @@ pub async fn start_gemini(
                         match event {
                             GeminiEvent::Transcription { ref text, .. } => {
                                 // Emit Tauri event for the frontend
-                                let _ = app_handle.emit(
-                                    events::GEMINI_TRANSCRIPTION,
-                                    &event,
-                                );
+                                let _ = app_handle.emit(events::GEMINI_TRANSCRIPTION, &event);
 
                                 // Feed transcription into the knowledge graph
                                 // (same extraction pipeline as local transcripts)
@@ -1318,36 +1306,27 @@ pub async fn start_gemini(
                                 }
                             }
                             GeminiEvent::ModelResponse { .. } => {
-                                let _ = app_handle.emit(
-                                    events::GEMINI_RESPONSE,
-                                    &event,
-                                );
+                                let _ = app_handle.emit(events::GEMINI_RESPONSE, &event);
                             }
                             GeminiEvent::Error { ref message } => {
                                 log::error!("Gemini error event: {}", message);
-                                let _ = app_handle.emit(
-                                    events::GEMINI_STATUS,
-                                    &event,
-                                );
+                                let _ = app_handle.emit(events::GEMINI_STATUS, &event);
                             }
                             GeminiEvent::Connected => {
-                                let _ = app_handle.emit(
-                                    events::GEMINI_STATUS,
-                                    &event,
-                                );
+                                let _ = app_handle.emit(events::GEMINI_STATUS, &event);
                             }
                             GeminiEvent::TurnComplete => {
                                 // Model finished its turn; no action needed.
                                 log::debug!("Gemini: turn complete");
                             }
                             GeminiEvent::Disconnected => {
-                                let _ = app_handle.emit(
-                                    events::GEMINI_STATUS,
-                                    &event,
-                                );
+                                let _ = app_handle.emit(events::GEMINI_STATUS, &event);
                                 break;
                             }
-                            GeminiEvent::Reconnecting { attempt, backoff_secs } => {
+                            GeminiEvent::Reconnecting {
+                                attempt,
+                                backoff_secs,
+                            } => {
                                 // Auto-reconnect in flight — surface through
                                 // the status event so the UI can show a
                                 // "reconnecting…" hint. Do NOT break the loop:
@@ -1357,19 +1336,14 @@ pub async fn start_gemini(
                                 // is exhausted.
                                 log::info!(
                                     "Gemini: reconnecting attempt={} backoff={}s",
-                                    attempt, backoff_secs
+                                    attempt,
+                                    backoff_secs
                                 );
-                                let _ = app_handle.emit(
-                                    events::GEMINI_STATUS,
-                                    &event,
-                                );
+                                let _ = app_handle.emit(events::GEMINI_STATUS, &event);
                             }
                             GeminiEvent::Reconnected => {
                                 log::info!("Gemini: reconnected");
-                                let _ = app_handle.emit(
-                                    events::GEMINI_STATUS,
-                                    &event,
-                                );
+                                let _ = app_handle.emit(events::GEMINI_STATUS, &event);
                             }
                         }
                     }
@@ -1396,10 +1370,7 @@ pub async fn start_gemini(
 /// Disconnects the client, signals worker threads to stop via the
 /// `is_gemini_active` flag, and cleans up thread handles.
 #[tauri::command]
-pub async fn stop_gemini(
-    state: State<'_, AppState>,
-    _app: tauri::AppHandle,
-) -> Result<(), String> {
+pub async fn stop_gemini(state: State<'_, AppState>, _app: tauri::AppHandle) -> Result<(), String> {
     log::info!("stop_gemini called");
 
     // 1. Set active flag to false (signals worker threads to exit)
@@ -1520,8 +1491,7 @@ pub async fn load_graph(path: String, state: State<'_, AppState>) -> Result<(), 
         return Err(format!("Graph file not found: {}", path));
     }
 
-    let loaded =
-        crate::graph::temporal::TemporalKnowledgeGraph::load_from_file(&file_path)?;
+    let loaded = crate::graph::temporal::TemporalKnowledgeGraph::load_from_file(&file_path)?;
 
     // Replace the in-memory knowledge graph
     {

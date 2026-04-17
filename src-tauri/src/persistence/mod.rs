@@ -245,20 +245,16 @@ pub fn spawn_graph_autosave(
                 let (segment_count, speaker_count): (u64, u64) = match transcript_buffer.read() {
                     Ok(buf) => {
                         let segments = buf.len() as u64;
-                        let speakers: HashSet<&str> = buf
-                            .iter()
-                            .filter_map(|s| s.speaker_id.as_deref())
-                            .collect();
+                        let speakers: HashSet<&str> =
+                            buf.iter().filter_map(|s| s.speaker_id.as_deref()).collect();
                         (segments, speakers.len() as u64)
                     }
                     Err(e) => {
                         log::warn!("Graph auto-save: transcript buffer lock poisoned: {}", e);
                         let buf = e.into_inner();
                         let segments = buf.len() as u64;
-                        let speakers: HashSet<&str> = buf
-                            .iter()
-                            .filter_map(|s| s.speaker_id.as_deref())
-                            .collect();
+                        let speakers: HashSet<&str> =
+                            buf.iter().filter_map(|s| s.speaker_id.as_deref()).collect();
                         (segments, speakers.len() as u64)
                     }
                 };

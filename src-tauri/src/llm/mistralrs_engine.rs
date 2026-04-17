@@ -50,9 +50,7 @@ impl MistralRsEngine {
             .map_err(|e| format!("Failed to create tokio runtime for mistral.rs: {}", e))?;
 
         let model = rt
-            .block_on(
-                GgufModelBuilder::new(model_dir, vec![model_filename.to_string()]).build(),
-            )
+            .block_on(GgufModelBuilder::new(model_dir, vec![model_filename.to_string()]).build())
             .map_err(|e| format!("Failed to build mistral.rs model: {}", e))?;
 
         log::info!(
@@ -96,8 +94,7 @@ Output JSON:"#,
             speaker, text
         );
 
-        let messages =
-            TextMessages::new().add_message(TextMessageRole::User, &prompt);
+        let messages = TextMessages::new().add_message(TextMessageRole::User, &prompt);
 
         let result: ExtractionResult = self
             .rt

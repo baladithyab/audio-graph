@@ -115,16 +115,12 @@ enum AudioCmd {
 // ---------------------------------------------------------------------------
 
 type WsWriter = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Message,
 >;
 
 type WsReader = futures_util::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 // ---------------------------------------------------------------------------
@@ -711,10 +707,7 @@ async fn run_io(
 }
 
 /// Parse a single Deepgram server JSON message and emit appropriate events.
-fn handle_server_message(
-    text: &str,
-    tx: &crossbeam_channel::Sender<DeepgramEvent>,
-) {
+fn handle_server_message(text: &str, tx: &crossbeam_channel::Sender<DeepgramEvent>) {
     let parsed: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(e) => {
@@ -740,10 +733,7 @@ fn handle_server_message(
                 .get("speech_final")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let start = parsed
-                .get("start")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
+            let start = parsed.get("start").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let duration = parsed
                 .get("duration")
                 .and_then(|v| v.as_f64())
@@ -777,10 +767,14 @@ fn handle_server_message(
                             .iter()
                             .filter_map(|w| {
                                 let word = w.get("word")?.as_str()?.to_string();
-                                let word_start = w.get("start").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let word_start =
+                                    w.get("start").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                 let end = w.get("end").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                let conf = w.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                                let speaker = w.get("speaker").and_then(|v| v.as_u64()).map(|s| s as u32);
+                                let conf =
+                                    w.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0)
+                                        as f32;
+                                let speaker =
+                                    w.get("speaker").and_then(|v| v.as_u64()).map(|s| s as u32);
                                 Some(DeepgramWord {
                                     word,
                                     start: word_start,
@@ -968,7 +962,10 @@ mod tests {
 
         handle_server_message(msg, &tx);
 
-        assert!(rx.try_recv().is_err(), "Empty transcript should not emit event");
+        assert!(
+            rx.try_recv().is_err(),
+            "Empty transcript should not emit event"
+        );
     }
 
     #[test]

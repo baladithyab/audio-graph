@@ -53,8 +53,7 @@ pub struct CredentialStore {
 }
 
 pub fn config_dir() -> Result<PathBuf, String> {
-    let base =
-        dirs::config_dir().ok_or_else(|| "Cannot determine config directory".to_string())?;
+    let base = dirs::config_dir().ok_or_else(|| "Cannot determine config directory".to_string())?;
     let dir = base.join("audio-graph");
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
     Ok(dir)
@@ -69,19 +68,17 @@ pub fn load_credentials() -> CredentialStore {
         Ok(path) => {
             if path.exists() {
                 match fs::read_to_string(&path) {
-                    Ok(contents) => {
-                        match serde_yaml::from_str::<CredentialStore>(&contents) {
-                            Ok(store) => store,
-                            Err(e) => {
-                                log::error!(
+                    Ok(contents) => match serde_yaml::from_str::<CredentialStore>(&contents) {
+                        Ok(store) => store,
+                        Err(e) => {
+                            log::error!(
                                     "Failed to parse credentials.yaml ({}): using empty credential store. \
                                      Backup your file and re-enter credentials in Settings.",
                                     e
                                 );
-                                CredentialStore::default()
-                            }
+                            CredentialStore::default()
                         }
-                    }
+                    },
                     Err(e) => {
                         log::error!(
                             "Failed to read credentials.yaml ({}): using empty credential store.",
@@ -119,8 +116,8 @@ pub fn try_load_credentials() -> Result<CredentialStore, String> {
 
 pub fn save_credentials(store: &CredentialStore) -> Result<(), String> {
     let path = credentials_path()?;
-    let yaml =
-        serde_yaml::to_string(store).map_err(|e| format!("Failed to serialize credentials: {}", e))?;
+    let yaml = serde_yaml::to_string(store)
+        .map_err(|e| format!("Failed to serialize credentials: {}", e))?;
     let tmp_path = path.with_extension("yaml.tmp");
     fs::write(&tmp_path, &yaml).map_err(|e| format!("Failed to write credentials: {}", e))?;
 

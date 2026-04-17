@@ -122,16 +122,12 @@ enum AudioCmd {
 // ---------------------------------------------------------------------------
 
 type WsWriter = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Message,
 >;
 
 type WsReader = futures_util::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 // ---------------------------------------------------------------------------
@@ -208,11 +204,13 @@ impl GeminiLiveClient {
                     return Err("Gemini API key is not configured".to_string());
                 }
             }
-            crate::settings::GeminiAuthMode::VertexAI { project_id, location, .. } => {
+            crate::settings::GeminiAuthMode::VertexAI {
+                project_id,
+                location,
+                ..
+            } => {
                 if project_id.is_empty() || location.is_empty() {
-                    return Err(
-                        "Vertex AI project_id and location must be configured".to_string(),
-                    );
+                    return Err("Vertex AI project_id and location must be configured".to_string());
                 }
             }
         }
@@ -434,7 +432,11 @@ fn build_setup_message(config: &GeminiConfig) -> Value {
         crate::settings::GeminiAuthMode::ApiKey { .. } => {
             format!("models/{}", config.model)
         }
-        crate::settings::GeminiAuthMode::VertexAI { project_id, location, .. } => {
+        crate::settings::GeminiAuthMode::VertexAI {
+            project_id,
+            location,
+            ..
+        } => {
             format!(
                 "projects/{}/locations/{}/publishers/google/models/{}",
                 project_id, location, config.model,
@@ -469,9 +471,7 @@ fn build_setup_message(config: &GeminiConfig) -> Value {
 ///
 /// Used for the initial connect *and* every reconnect attempt, so the full
 /// handshake is replayed on reconnect.
-async fn open_ws(
-    config: &GeminiConfig,
-) -> Result<(WsWriter, WsReader, Option<String>), String> {
+async fn open_ws(config: &GeminiConfig) -> Result<(WsWriter, WsReader, Option<String>), String> {
     // ── Open WebSocket ─────────────────────────────────────────────────
     let (ws_stream, _response) = match &config.auth {
         crate::settings::GeminiAuthMode::ApiKey { api_key } => {
@@ -726,9 +726,7 @@ async fn session_task(
                             }
                         }
                         connected.store(true, Ordering::SeqCst);
-                        log::info!(
-                            "Gemini session: reconnected on attempt {reconnect_attempts}"
-                        );
+                        log::info!("Gemini session: reconnected on attempt {reconnect_attempts}");
                         let _ = event_tx.send(GeminiEvent::Reconnected);
                         reconnect_attempts = 0;
                         // Loop around to resume run_io with the new halves.
@@ -738,9 +736,7 @@ async fn session_task(
                             "Gemini session: reconnect attempt {reconnect_attempts} failed: {e}"
                         );
                         let _ = event_tx.send(GeminiEvent::Error {
-                            message: format!(
-                                "Reconnect attempt {reconnect_attempts} failed: {e}"
-                            ),
+                            message: format!("Reconnect attempt {reconnect_attempts} failed: {e}"),
                         });
                         // Skip run_io next iteration — just try the next
                         // backoff step directly.
@@ -1007,9 +1003,7 @@ mod tests {
             msg["setup"]["generationConfig"]["responseModalities"][0],
             "TEXT"
         );
-        assert!(
-            msg["setup"]["generationConfig"]["inputAudioTranscription"].is_object()
-        );
+        assert!(msg["setup"]["generationConfig"]["inputAudioTranscription"].is_object());
     }
 
     #[test]

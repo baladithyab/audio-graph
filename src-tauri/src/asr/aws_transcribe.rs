@@ -35,9 +35,7 @@ fn f32_to_pcm_bytes(samples: &[f32]) -> Vec<u8> {
     bytes
 }
 
-async fn build_aws_config(
-    config: &AwsTranscribeConfig,
-) -> Result<aws_config::SdkConfig, String> {
+async fn build_aws_config(config: &AwsTranscribeConfig) -> Result<aws_config::SdkConfig, String> {
     let region = aws_config::Region::new(config.region.clone());
     match &config.credential_source {
         AwsCredentialSource::DefaultChain => Ok(aws_config::defaults(BehaviorVersion::latest())
@@ -60,13 +58,8 @@ async fn build_aws_config(
                 .clone()
                 .ok_or("AWS secret key not found in credentials store")?;
             let session_token = cred_store.aws_session_token.clone();
-            let creds = Credentials::new(
-                access_key,
-                &secret_key,
-                session_token,
-                None,
-                "audio-graph",
-            );
+            let creds =
+                Credentials::new(access_key, &secret_key, session_token, None, "audio-graph");
             Ok(aws_config::defaults(BehaviorVersion::latest())
                 .credentials_provider(creds)
                 .region(region)
@@ -105,8 +98,9 @@ async fn run_streaming_session(
     let sdk_config = build_aws_config(&config).await?;
     let client = transcribe::Client::new(&sdk_config);
 
-    let (audio_tx, audio_stream_rx) =
-        tokio::sync::mpsc::channel::<Result<AudioStream, transcribe::types::error::AudioStreamError>>(16);
+    let (audio_tx, audio_stream_rx) = tokio::sync::mpsc::channel::<
+        Result<AudioStream, transcribe::types::error::AudioStreamError>,
+    >(16);
 
     let audio_stream: aws_smithy_http::event_stream::EventStreamSender<
         AudioStream,
@@ -197,14 +191,11 @@ async fn run_streaming_session(
                             continue;
                         }
 
-                        let speaker_label = alt
-                            .items
-                            .as_ref()
-                            .and_then(|items| {
-                                items
-                                    .iter()
-                                    .find_map(|item| item.speaker().map(|s| s.to_string()))
-                            });
+                        let speaker_label = alt.items.as_ref().and_then(|items| {
+                            items
+                                .iter()
+                                .find_map(|item| item.speaker().map(|s| s.to_string()))
+                        });
 
                         let confidence = alt
                             .items

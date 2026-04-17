@@ -165,10 +165,7 @@ pub fn transcribe_segment(
             .into_iter()
             .filter(|s| !s.text.trim().is_empty())
             .map(|s| {
-                let confidence = s
-                    .no_speech_prob
-                    .map(|p| (1.0 - p) as f32)
-                    .unwrap_or(0.9);
+                let confidence = s.no_speech_prob.map(|p| (1.0 - p) as f32).unwrap_or(0.9);
                 TranscriptSegment {
                     id: Uuid::new_v4().to_string(),
                     source_id: segment.source_id.clone(),

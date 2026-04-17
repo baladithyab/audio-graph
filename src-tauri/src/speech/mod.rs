@@ -1863,7 +1863,10 @@ fn run_deepgram_event_receiver(
             DeepgramEvent::Connected => {
                 log::debug!("Deepgram event receiver: connected event received");
             }
-            DeepgramEvent::Reconnecting { attempt, backoff_secs } => {
+            DeepgramEvent::Reconnecting {
+                attempt,
+                backoff_secs,
+            } => {
                 // Auto-reconnect in flight — surface through pipeline status
                 // so the UI can show a "reconnecting…" hint instead of
                 // leaving the stage looking healthy.
@@ -1996,7 +1999,9 @@ pub(crate) fn run_assemblyai_speech_processor(
             Ok(chunk) => chunk,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 if !is_transcribing.load(Ordering::Relaxed) {
-                    log::info!("AssemblyAI streaming: is_transcribing flag cleared, exiting sender");
+                    log::info!(
+                        "AssemblyAI streaming: is_transcribing flag cleared, exiting sender"
+                    );
                     break;
                 }
                 continue;
@@ -2349,9 +2354,20 @@ pub(crate) fn run_sherpa_onnx_speech_processor(
                 };
             }
             run_speech_processor_diarization_only(
-                processed_rx, is_transcribing, transcript_buffer, transcript_writer,
-                pipeline_status, app_handle, knowledge_graph, graph_snapshot,
-                graph_extractor, llm_engine, api_client, mistralrs_engine, models_dir, llm_provider,
+                processed_rx,
+                is_transcribing,
+                transcript_buffer,
+                transcript_writer,
+                pipeline_status,
+                app_handle,
+                knowledge_graph,
+                graph_snapshot,
+                graph_extractor,
+                llm_engine,
+                api_client,
+                mistralrs_engine,
+                models_dir,
+                llm_provider,
             );
             return;
         }
@@ -2446,7 +2462,9 @@ pub(crate) fn run_sherpa_onnx_speech_processor(
 
                 log::debug!(
                     "Sherpa-onnx streaming: emitted transcript #{} speaker={:?} \"{}\"",
-                    asr_count, final_segment.speaker_label, &final_segment.text,
+                    asr_count,
+                    final_segment.speaker_label,
+                    &final_segment.text,
                 );
 
                 // SPEAKER_DETECTED was already emitted above — pass `None`
@@ -2466,14 +2484,17 @@ pub(crate) fn run_sherpa_onnx_speech_processor(
         if chunks_processed % 500 == 0 {
             log::debug!(
                 "Sherpa-onnx streaming: processed {} chunks, {} transcripts",
-                chunks_processed, asr_count
+                chunks_processed,
+                asr_count
             );
         }
     }
 
     log::info!(
         "Sherpa-onnx streaming: exiting. Chunks={}, ASR={}, diarized={}",
-        chunks_processed, asr_count, diarization_count,
+        chunks_processed,
+        asr_count,
+        diarization_count,
     );
 }
 

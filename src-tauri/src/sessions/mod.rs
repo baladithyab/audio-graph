@@ -77,7 +77,9 @@ fn now_millis() -> u64 {
 
 /// Register current session in the index (called at app start).
 pub fn register_session(session_id: &str) -> Result<(), String> {
-    let _guard = INDEX_LOCK.lock().map_err(|e| format!("index lock poisoned: {}", e))?;
+    let _guard = INDEX_LOCK
+        .lock()
+        .map_err(|e| format!("index lock poisoned: {}", e))?;
     let mut index = load_index();
     // Mark any prior "active" sessions (from previous runs that didn't clean
     // up — e.g., SIGKILL, power loss) as "crashed". Skip the CURRENT session
@@ -128,7 +130,9 @@ pub fn update_stats(
     speaker_count: u64,
     entity_count: u64,
 ) -> Result<(), String> {
-    let _guard = INDEX_LOCK.lock().map_err(|e| format!("index lock poisoned: {}", e))?;
+    let _guard = INDEX_LOCK
+        .lock()
+        .map_err(|e| format!("index lock poisoned: {}", e))?;
     let mut index = load_index();
     if let Some(entry) = index.iter_mut().find(|e| e.id == session_id) {
         entry.segment_count = segment_count;
@@ -141,7 +145,9 @@ pub fn update_stats(
 /// Remove a session from the index. Callers are responsible for deleting
 /// the transcript/graph files on disk — this only touches the index.
 pub fn remove_from_index(session_id: &str) -> Result<(), String> {
-    let _guard = INDEX_LOCK.lock().map_err(|e| format!("index lock poisoned: {}", e))?;
+    let _guard = INDEX_LOCK
+        .lock()
+        .map_err(|e| format!("index lock poisoned: {}", e))?;
     let mut index = load_index();
     index.retain(|s| s.id != session_id);
     save_index(&index)
@@ -149,7 +155,9 @@ pub fn remove_from_index(session_id: &str) -> Result<(), String> {
 
 /// Mark session as complete on app shutdown.
 pub fn finalize_session(session_id: &str) -> Result<(), String> {
-    let _guard = INDEX_LOCK.lock().map_err(|e| format!("index lock poisoned: {}", e))?;
+    let _guard = INDEX_LOCK
+        .lock()
+        .map_err(|e| format!("index lock poisoned: {}", e))?;
     let mut index = load_index();
     if let Some(entry) = index.iter_mut().find(|e| e.id == session_id) {
         entry.status = "complete".into();

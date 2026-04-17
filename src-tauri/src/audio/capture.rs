@@ -107,12 +107,12 @@ impl AudioCaptureManager {
                     rsac::AudioSourceKind::Device { device_id, .. } => AudioSourceType::Device {
                         device_id: device_id.clone(),
                     },
-                    rsac::AudioSourceKind::Application {
-                        pid, app_name, ..
-                    } => AudioSourceType::Application {
-                        pid: *pid,
-                        app_name: app_name.clone(),
-                    },
+                    rsac::AudioSourceKind::Application { pid, app_name, .. } => {
+                        AudioSourceType::Application {
+                            pid: *pid,
+                            app_name: app_name.clone(),
+                        }
+                    }
                 };
                 AudioSourceInfo {
                     id: src.id,

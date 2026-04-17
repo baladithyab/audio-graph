@@ -91,16 +91,12 @@ enum AudioCmd {
 // ---------------------------------------------------------------------------
 
 type WsWriter = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Message,
 >;
 
 type WsReader = futures_util::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 // ---------------------------------------------------------------------------
@@ -591,10 +587,7 @@ async fn run_io(
 }
 
 /// Parse a single server JSON message and emit appropriate events.
-fn handle_server_message(
-    text: &str,
-    tx: &crossbeam_channel::Sender<AssemblyAIEvent>,
-) {
+fn handle_server_message(text: &str, tx: &crossbeam_channel::Sender<AssemblyAIEvent>) {
     let parsed: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(e) => {
@@ -818,7 +811,10 @@ mod tests {
         let msg = r#"{ "message_type": "PartialTranscript", "text": "" }"#;
         handle_server_message(msg, &tx);
 
-        assert!(rx.try_recv().is_err(), "Empty partials should not be emitted");
+        assert!(
+            rx.try_recv().is_err(),
+            "Empty partials should not be emitted"
+        );
     }
 
     #[test]
