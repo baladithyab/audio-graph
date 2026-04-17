@@ -3,8 +3,19 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Stores API credentials for cloud providers.
+///
+/// # Security
+///
+/// This type derives [`Zeroize`] and [`ZeroizeOnDrop`] so that all secret
+/// fields are overwritten with zeros when the struct goes out of scope.
+/// This mitigates exposure of plaintext API keys in memory dumps, swap
+/// files, and cold-boot attacks. The `serde` feature of the `zeroize`
+/// crate makes the derive compatible with the existing `Serialize`/
+/// `Deserialize` implementations.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct CredentialStore {
     // --- OpenAI-compatible API keys ---
     #[serde(default)]
@@ -76,13 +87,14 @@ pub fn save_credentials(store: &CredentialStore) -> Result<(), String> {
     let tmp_path = path.with_extension("yaml.tmp");
     fs::write(&tmp_path, &yaml).map_err(|e| format!("Failed to write credentials: {}", e))?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
-    }
+    // Set restrictive permissions on the tmp file before rename, in case the
+    // rename preserves the source file's permissions on some platforms.
+    crate::fs_util::set_owner_only(&tmp_path);
 
     fs::rename(&tmp_path, &path).map_err(|e| format!("Failed to finalize credentials: {}", e))?;
+
+    // And again on the final file to be safe.
+    crate::fs_util::set_owner_only(&path);
 
     log::info!("Credentials saved to {}", path.display());
     Ok(())

@@ -1,6 +1,11 @@
-import { useRef, useEffect, useMemo, useCallback } from "react";
+import { useRef, useEffect, useMemo, useCallback, useState } from "react";
 import { useAudioGraphStore } from "../store";
 import { formatTime } from "../utils/format";
+import {
+  downloadAsFile,
+  filenameTimestamp,
+  transcriptToTxt,
+} from "../utils/download";
 
 /** Default fallback colors when speaker has no assigned color. */
 const FALLBACK_COLORS = [
@@ -16,9 +21,58 @@ const FALLBACK_COLORS = [
 function LiveTranscript() {
   const segments = useAudioGraphStore((s) => s.transcriptSegments);
   const speakers = useAudioGraphStore((s) => s.speakers);
+  const exportTranscript = useAudioGraphStore((s) => s.exportTranscript);
+  const getSessionId = useAudioGraphStore((s) => s.getSessionId);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const wasNearBottomRef = useRef(true);
+
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  // Build a filename for an export in the form
+  // `transcript-<sessionId>-<timestamp>.<ext>`. Falls back to "session" if
+  // the backend session id can't be resolved.
+  const buildFilename = useCallback(
+    async (ext: "json" | "txt") => {
+      let sessionId = "session";
+      try {
+        sessionId = await getSessionId();
+      } catch {
+        // Non-fatal — keep the fallback.
+      }
+      return `transcript-${sessionId}-${filenameTimestamp()}.${ext}`;
+    },
+    [getSessionId],
+  );
+
+  const handleExportJson = useCallback(async () => {
+    setIsExporting(true);
+    setExportError(null);
+    try {
+      const json = await exportTranscript();
+      const filename = await buildFilename("json");
+      downloadAsFile(json, filename, "application/json");
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsExporting(false);
+    }
+  }, [exportTranscript, buildFilename]);
+
+  const handleExportTxt = useCallback(async () => {
+    setIsExporting(true);
+    setExportError(null);
+    try {
+      const text = transcriptToTxt(segments);
+      const filename = await buildFilename("txt");
+      downloadAsFile(text, filename, "text/plain");
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsExporting(false);
+    }
+  }, [segments, buildFilename]);
 
   // Build a quick speaker-color lookup
   const speakerColorMap = useMemo(() => {
@@ -75,10 +129,35 @@ function LiveTranscript() {
     <div className="transcript">
       <div className="transcript__header">
         <h3 className="panel-title">Live Transcript</h3>
-        {segments.length > 0 && (
-          <span className="transcript__count">{segments.length}</span>
-        )}
+        <div className="transcript__header-actions">
+          {segments.length > 0 && (
+            <span className="transcript__count">{segments.length}</span>
+          )}
+          <button
+            className="panel-export-btn"
+            onClick={handleExportJson}
+            disabled={isExporting || segments.length === 0}
+            title="Export transcript as JSON"
+            aria-label="Export transcript as JSON"
+          >
+            ⇩ JSON
+          </button>
+          <button
+            className="panel-export-btn"
+            onClick={handleExportTxt}
+            disabled={isExporting || segments.length === 0}
+            title="Export transcript as plain text"
+            aria-label="Export transcript as plain text"
+          >
+            ⇩ TXT
+          </button>
+        </div>
       </div>
+      {exportError && (
+        <div className="panel-export-error" role="alert">
+          Export failed: {exportError}
+        </div>
+      )}
 
       <div
         className="transcript__list"

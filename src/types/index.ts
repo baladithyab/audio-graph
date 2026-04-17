@@ -337,6 +337,11 @@ export interface AudioGraphStore {
     graphSnapshot: GraphSnapshot;
     setGraphSnapshot: (snapshot: GraphSnapshot) => void;
 
+    // Exports (backend → JSON string)
+    exportTranscript: () => Promise<string>;
+    exportGraph: () => Promise<string>;
+    getSessionId: () => Promise<string>;
+
     // Pipeline status
     pipelineStatus: PipelineStatus;
     setPipelineStatus: (status: PipelineStatus) => void;

@@ -68,6 +68,17 @@ export const useAudioGraphStore = create<AudioGraphStore>((set, get) => ({
     },
     setGraphSnapshot: (snapshot) => set({ graphSnapshot: snapshot }),
 
+    // ── Exports ──────────────────────────────────────────────────────────
+    exportTranscript: async () => {
+        return await invoke<string>("export_transcript");
+    },
+    exportGraph: async () => {
+        return await invoke<string>("export_graph");
+    },
+    getSessionId: async () => {
+        return await invoke<string>("get_session_id");
+    },
+
     // ── Pipeline status ──────────────────────────────────────────────────
     pipelineStatus: {
         capture: idleStage,

@@ -198,13 +198,21 @@ impl GeminiLiveClient {
             // ── Open WebSocket ─────────────────────────────────────────
             let (ws_stream, _response) = match &auth {
                 crate::settings::GeminiAuthMode::ApiKey { api_key } => {
-                    let url_str = format!(
-                        "wss://generativelanguage.googleapis.com/ws/\
+                    // Security: pass API key in header (not URL query string).
+                    // URLs get logged by DNS, proxies, firewalls, cert monitoring —
+                    // defeating TLS protection. Headers are not logged by default.
+                    let url_str = "wss://generativelanguage.googleapis.com/ws/\
                          google.ai.generativelanguage.v1beta.\
-                         GenerativeService.BidiGenerateContent?key={}",
-                        api_key,
-                    );
-                    connect_async(&url_str)
+                         GenerativeService.BidiGenerateContent";
+
+                    let request = tungstenite::http::Request::builder()
+                        .uri(url_str)
+                        .header("x-goog-api-key", api_key)
+                        .header("Content-Type", "application/json")
+                        .body(())
+                        .map_err(|e| format!("Failed to build WebSocket request: {e}"))?;
+
+                    connect_async(request)
                         .await
                         .map_err(|e| format!("WebSocket connect failed: {e}"))?
                 }

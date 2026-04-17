@@ -7,6 +7,7 @@ import ForceGraph2D, {
 import { useAudioGraphStore } from "../store";
 import type { GraphNode, GraphLink } from "../types";
 import { formatTime } from "../utils/format";
+import { downloadAsFile, filenameTimestamp } from "../utils/download";
 
 /** Compute node radius from val. */
 function nodeRadius(val: number): number {
@@ -16,11 +17,36 @@ function nodeRadius(val: number): number {
 
 function KnowledgeGraphViewer() {
   const graphSnapshot = useAudioGraphStore((s) => s.graphSnapshot);
+  const exportGraph = useAudioGraphStore((s) => s.exportGraph);
+  const getSessionId = useAudioGraphStore((s) => s.getSessionId);
 
   // ResizeObserver for auto-sizing to parent container
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<ForceGraphMethods | undefined>(undefined);
   const [dimensions, setDimensions] = useState({ width: 600, height: 400 });
+
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const handleExportJson = useCallback(async () => {
+    setIsExporting(true);
+    setExportError(null);
+    try {
+      const json = await exportGraph();
+      let sessionId = "session";
+      try {
+        sessionId = await getSessionId();
+      } catch {
+        // Non-fatal — keep the fallback.
+      }
+      const filename = `graph-${sessionId}-${filenameTimestamp()}.json`;
+      downloadAsFile(json, filename, "application/json");
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsExporting(false);
+    }
+  }, [exportGraph, getSessionId]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -252,6 +278,24 @@ function KnowledgeGraphViewer() {
           <span>Nodes: {total_nodes}</span>
           <span className="graph-viewer__stats-sep">|</span>
           <span>Edges: {total_edges}</span>
+        </div>
+      )}
+
+      <div className="graph-viewer__toolbar">
+        <button
+          className="panel-export-btn"
+          onClick={handleExportJson}
+          disabled={isExporting || !hasNodes}
+          title="Export knowledge graph as JSON"
+          aria-label="Export knowledge graph as JSON"
+        >
+          ⇩ Export
+        </button>
+      </div>
+
+      {exportError && (
+        <div className="graph-viewer__export-error" role="alert">
+          Export failed: {exportError}
         </div>
       )}
     </div>

@@ -1359,20 +1359,23 @@ pub fn save_credential_cmd(key: String, value: String) -> Result<(), String> {
 #[tauri::command]
 pub fn load_credential_cmd(key: String) -> Result<Option<String>, String> {
     let store = crate::credentials::load_credentials();
+    // Note: `CredentialStore` implements `Drop` (via `ZeroizeOnDrop`), so we
+    // cannot move fields out of it — clone the returned value instead. The
+    // original `store` is zeroized when it goes out of scope.
     let value = match key.as_str() {
-        "openai_api_key" => store.openai_api_key,
-        "groq_api_key" => store.groq_api_key,
-        "together_api_key" => store.together_api_key,
-        "fireworks_api_key" => store.fireworks_api_key,
-        "deepgram_api_key" => store.deepgram_api_key,
-        "assemblyai_api_key" => store.assemblyai_api_key,
-        "gemini_api_key" => store.gemini_api_key,
-        "google_service_account_path" => store.google_service_account_path,
-        "aws_access_key" => store.aws_access_key,
-        "aws_secret_key" => store.aws_secret_key,
-        "aws_session_token" => store.aws_session_token,
-        "aws_profile" => store.aws_profile,
-        "aws_region" => store.aws_region,
+        "openai_api_key" => store.openai_api_key.clone(),
+        "groq_api_key" => store.groq_api_key.clone(),
+        "together_api_key" => store.together_api_key.clone(),
+        "fireworks_api_key" => store.fireworks_api_key.clone(),
+        "deepgram_api_key" => store.deepgram_api_key.clone(),
+        "assemblyai_api_key" => store.assemblyai_api_key.clone(),
+        "gemini_api_key" => store.gemini_api_key.clone(),
+        "google_service_account_path" => store.google_service_account_path.clone(),
+        "aws_access_key" => store.aws_access_key.clone(),
+        "aws_secret_key" => store.aws_secret_key.clone(),
+        "aws_session_token" => store.aws_session_token.clone(),
+        "aws_profile" => store.aws_profile.clone(),
+        "aws_region" => store.aws_region.clone(),
         _ => return Err(format!("Unknown credential key: {}", key)),
     };
     Ok(value)

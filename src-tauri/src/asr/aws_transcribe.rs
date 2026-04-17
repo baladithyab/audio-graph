@@ -53,10 +53,13 @@ async fn build_aws_config(
         }
         AwsCredentialSource::AccessKeys { access_key } => {
             let cred_store = crate::credentials::load_credentials();
+            // `CredentialStore` implements `Drop` (via `ZeroizeOnDrop`), so
+            // fields must be cloned rather than moved out.
             let secret_key = cred_store
                 .aws_secret_key
+                .clone()
                 .ok_or("AWS secret key not found in credentials store")?;
-            let session_token = cred_store.aws_session_token;
+            let session_token = cred_store.aws_session_token.clone();
             let creds = Credentials::new(
                 access_key,
                 &secret_key,

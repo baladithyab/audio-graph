@@ -18,6 +18,7 @@ pub mod commands;
 pub mod credentials;
 pub mod diarization;
 pub mod events;
+pub mod fs_util;
 pub mod gemini;
 pub mod graph;
 pub mod llm;

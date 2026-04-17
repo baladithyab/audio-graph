@@ -65,3 +65,44 @@ pub struct CaptureErrorPayload {
     pub error: String,
     pub recoverable: bool,
 }
+
+/// Emit a Tauri event and log any emission failure at `error` level.
+///
+/// The default `let _ = app.emit(...)` pattern silently swallows emission
+/// errors, which makes failed frontend notifications undebuggable. Use this
+/// helper instead so failures surface in logs.
+pub fn emit_or_log<P>(app: &tauri::AppHandle, event: &str, payload: P)
+where
+    P: serde::Serialize + Clone,
+{
+    use tauri::Emitter;
+    if let Err(e) = app.emit(event, payload) {
+        log::error!("Failed to emit event '{}': {}", event, e);
+    }
+}
+
+/// Heuristic classifier for capture errors into recoverable vs fatal.
+///
+/// Used at capture-error emit sites to populate `CaptureErrorPayload.recoverable`.
+/// Fatal errors indicate the source cannot be used again without user action
+/// (permission, device disconnection). Recoverable errors may succeed on retry.
+pub fn classify_capture_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    let fatal_markers = [
+        "permission denied",
+        "not permitted",
+        "unauthorized",
+        "disconnected",
+        "device not found",
+        "no such device",
+        "device removed",
+        "access denied",
+        "not supported",
+        "unsupported",
+    ];
+    if fatal_markers.iter().any(|m| lower.contains(m)) {
+        return false;
+    }
+    // Default to recoverable for unclassified errors — user can retry.
+    true
+}

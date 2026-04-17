@@ -354,8 +354,15 @@ pub fn save_settings(app: &tauri::AppHandle, settings: &AppSettings) -> Result<(
 
     let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, &json).map_err(|e| format!("Failed to write settings file: {}", e))?;
+
+    // Lock down perms before rename so the file is never world-readable, even briefly.
+    crate::fs_util::set_owner_only(&tmp_path);
+
     fs::rename(&tmp_path, &path)
         .map_err(|e| format!("Failed to finalize settings file: {}", e))?;
+
+    // Re-apply after rename in case rename semantics differ across platforms.
+    crate::fs_util::set_owner_only(&path);
 
     log::info!("Settings saved to {}", path.display());
     Ok(())

@@ -184,9 +184,13 @@ impl AppState {
 
         // Per-consumer fan-out channels (Bug 1 fix):
         // Each downstream consumer gets its own channel so both receive ALL chunks.
-        // Speech channel sized at 256 (~8s at 32ms/chunk) to absorb ASR latency spikes.
+        // Speech channel sized at 1024 (~32s at 32ms/chunk) to absorb ASR latency
+        // spikes. Cloud ASR providers (OpenAI Whisper, Groq) can take 1–5s per
+        // request; at 256 chunks (~8s) a single slow burst would overflow the
+        // channel and drop audio. 1024 gives the accumulator enough headroom
+        // to keep producing segments while the ASR worker waits on HTTP.
         let (speech_audio_tx, speech_audio_rx) =
-            crossbeam_channel::bounded::<ProcessedAudioChunk>(256);
+            crossbeam_channel::bounded::<ProcessedAudioChunk>(1024);
         let (gemini_audio_tx, gemini_audio_rx) =
             crossbeam_channel::bounded::<ProcessedAudioChunk>(16);
 

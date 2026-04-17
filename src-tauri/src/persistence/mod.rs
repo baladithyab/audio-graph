@@ -96,6 +96,9 @@ impl TranscriptWriter {
                         return;
                     }
                 };
+                // Lock down perms as soon as the file exists. Transcripts can
+                // contain sensitive speech content.
+                crate::fs_util::set_owner_only(&file_path);
                 let mut writer = BufWriter::new(file);
 
                 while let Ok(msg) = rx.recv() {
@@ -159,12 +162,23 @@ pub fn save_json<T: serde::Serialize>(value: &T, path: &Path) -> Result<(), Stri
     let tmp_path = path.with_extension("json.tmp");
     let file = fs::File::create(&tmp_path)
         .map_err(|e| format!("Failed to create temp file {:?}: {}", tmp_path, e))?;
-    let writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(writer, value)
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, value)
         .map_err(|e| format!("Failed to serialize to {:?}: {}", tmp_path, e))?;
+    writer
+        .flush()
+        .map_err(|e| format!("Failed to flush {:?}: {}", tmp_path, e))?;
+    drop(writer);
+
+    // Lock down perms on the tmp file before rename. Graph JSON can contain
+    // excerpts of transcribed speech that should not be world-readable.
+    crate::fs_util::set_owner_only(&tmp_path);
 
     fs::rename(&tmp_path, path)
         .map_err(|e| format!("Failed to rename {:?} → {:?}: {}", tmp_path, path, e))?;
+
+    // Re-apply after rename in case rename semantics differ across platforms.
+    crate::fs_util::set_owner_only(path);
 
     Ok(())
 }

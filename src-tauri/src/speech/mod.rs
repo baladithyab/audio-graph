@@ -6,8 +6,26 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
+
+/// Bounded thread pool for fire-and-forget entity extraction tasks.
+///
+/// Previously, each transcript segment spawned a new `std::thread` — a 10-hour
+/// session at 2 segments/sec creates 72,000 threads, exhausting OS thread
+/// limits (typically 1024-4096 per process). Using rayon's work-stealing pool
+/// with a fixed worker count (4) eliminates this issue while still giving
+/// extraction tasks their own thread budget separate from the ASR critical path.
+fn extraction_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .thread_name(|i| format!("extraction-{}", i))
+            .build()
+            .expect("Failed to build extraction thread pool")
+    })
+}
 
 use crossbeam_channel::Receiver;
 use tauri::{AppHandle, Emitter};
@@ -356,19 +374,11 @@ fn spawn_extraction_task(
         graph_update_count.store(local_graph, Ordering::Relaxed);
     };
 
-    if let Err(e) = std::thread::Builder::new()
-        .name("extraction-task".to_string())
-        .spawn(run_extraction)
-    {
-        log::warn!(
-            "Failed to spawn extraction task thread: {}. Running inline.",
-            e
-        );
-        // Recreate the closure data for inline execution — the moved data
-        // was consumed by the failed spawn attempt, so we'd need to clone
-        // again. Instead, just log the failure; the next extraction will
-        // try again. This should be extremely rare (thread limit exhaustion).
-    }
+    // Submit to the bounded rayon thread pool (4 workers). Unlike
+    // `std::thread::spawn`, `rayon::ThreadPool::spawn` cannot fail — work is
+    // queued on an existing worker. This prevents OS thread exhaustion during
+    // long sessions (previously 72K+ threads in 10hrs at 2 segments/sec).
+    extraction_pool().spawn(run_extraction);
 }
 
 // ---------------------------------------------------------------------------
@@ -1260,7 +1270,12 @@ pub(crate) fn run_cloud_asr_speech_processor(
     llm_provider: LlmProvider,
     cloud_config: CloudAsrConfig,
 ) {
-    let (asr_seg_tx, asr_seg_rx) = crossbeam_channel::bounded::<AccumulatedSegment>(4);
+    // Capacity 32 = up to ~64s of buffered 2s segments. Cloud ASR HTTP calls
+    // can take 1–5s per segment; a short 4-slot queue overflows during
+    // latency spikes and drops real audio. 32 slots give the accumulator
+    // meaningful headroom while still bounding memory (~32 × 2s × 16kHz × 4B
+    // ≈ 4 MB worst case).
+    let (asr_seg_tx, asr_seg_rx) = crossbeam_channel::bounded::<AccumulatedSegment>(32);
 
     let is_transcribing_asr = is_transcribing.clone();
     let _asr_worker_handle = std::thread::Builder::new()
@@ -1324,8 +1339,11 @@ pub(crate) fn run_cloud_asr_speech_processor(
         }
 
         if let Some(segment) = accumulator.feed(&chunk) {
-            if let Err(crossbeam_channel::TrySendError::Full(_)) = asr_seg_tx.try_send(segment) {
-                log::warn!("Cloud ASR: segment channel full, dropping segment (API slower than real-time)");
+            if let Err(crossbeam_channel::TrySendError::Full(seg)) = asr_seg_tx.try_send(segment) {
+                log::warn!(
+                    "Cloud ASR: segment channel full, dropping {:.2}s segment (API slower than real-time)",
+                    seg.num_frames as f64 / 16_000.0
+                );
             }
         }
     }

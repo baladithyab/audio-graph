@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use rsac::{AudioCaptureBuilder, CaptureTarget};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
-use crate::events::{CaptureErrorPayload, CAPTURE_ERROR};
+use crate::events::{emit_or_log, CaptureErrorPayload, CAPTURE_ERROR};
 use crate::state::{AudioSourceInfo, AudioSourceType};
 
 // ---------------------------------------------------------------------------
@@ -289,7 +289,8 @@ impl AudioCaptureManager {
                     source_id,
                     e
                 );
-                let _ = app_handle.emit(
+                emit_or_log(
+                    &app_handle,
                     CAPTURE_ERROR,
                     CaptureErrorPayload {
                         source_id: source_id.clone(),
@@ -304,12 +305,14 @@ impl AudioCaptureManager {
         // 2. Start capture.
         if let Err(e) = capture.start() {
             log::error!("[capture-{}] Failed to start capture: {}", source_id, e);
-            let _ = app_handle.emit(
+            let err_str = format!("{}", e);
+            emit_or_log(
+                &app_handle,
                 CAPTURE_ERROR,
                 CaptureErrorPayload {
                     source_id: source_id.clone(),
-                    error: format!("{}", e),
-                    recoverable: false,
+                    error: err_str.clone(),
+                    recoverable: crate::events::classify_capture_error(&err_str),
                 },
             );
             return;
@@ -320,7 +323,8 @@ impl AudioCaptureManager {
             Ok(r) => r,
             Err(e) => {
                 log::error!("[capture-{}] Failed to subscribe: {}", source_id, e);
-                let _ = app_handle.emit(
+                emit_or_log(
+                    &app_handle,
                     CAPTURE_ERROR,
                     CaptureErrorPayload {
                         source_id: source_id.clone(),
