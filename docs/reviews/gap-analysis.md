@@ -20,14 +20,22 @@ below — ✅ resolved, 🚧 partial, ⏳ open.
 
 ### CRITICAL
 
-1. ⏳ **No macOS notarization / code signing in CI** — Builds fail Gatekeeper.
-2. ⏳ **No Windows code signing** — Defender flags builds as suspicious.
-3. ⏳ **No version bumping or release script** — Stuck at `0.1.0`, no semver
-   discipline.
+1. 🚧 **No macOS notarization / code signing in CI** — `release.yml`
+   workflow passes `APPLE_*` secrets to tauri-action; signing happens
+   automatically if the repo secrets are populated. Still need to procure
+   an Apple Developer ID + populate secrets for actual signing.
+2. 🚧 **No Windows code signing** — same as above; `WINDOWS_CERTIFICATE`
+   + `WINDOWS_CERTIFICATE_PASSWORD` wired, awaiting cert procurement.
+3. ✅ **No version bumping or release script** — `scripts/bump-version.sh`
+   bumps the three version locations atomically (package.json,
+   src-tauri/Cargo.toml, src-tauri/tauri.conf.json) and rotates
+   CHANGELOG.md. See `docs/RELEASE.md` for the full workflow.
 4. ✅ **No frontend tests** — Vitest + React Testing Library scaffolded;
    12 passing tests across `download`, `format`, and `store` modules.
-5. ⏳ **No release build artifacts in CI** — DMG, EXE, AppImage, deb all
-   missing.
+5. ✅ **No release build artifacts in CI** — `.github/workflows/release.yml`
+   fires on `v*` tag push, uses tauri-action@v0.6.2 to build macOS DMG
+   (universal), Windows MSI+NSIS, Linux AppImage+deb in parallel and
+   drafts a GitHub Release with all artifacts attached.
 
 ### HIGH
 
@@ -122,9 +130,10 @@ These weren't in the original review but came up during the loops:
 ## Recommendations by Phase
 
 ### Phase 1: Critical (remaining work)
-1. ⏳ macOS notarization + Windows code signing in CI.
-2. ⏳ Release script with semver bump + changelog automation.
-3. ⏳ Emit downloadable artifacts (DMG, MSI, AppImage, deb).
+1. ⏳ Procure Apple Developer ID + Windows Authenticode cert; populate
+   the `APPLE_*` / `WINDOWS_*` GitHub secrets documented in
+   `docs/RELEASE.md`. The signing plumbing in `release.yml` is in place
+   and waiting.
 
 ### Phase 2: High (remaining work)
 4. ⏳ AWS credential refresh mid-stream (not just pre-flight).
