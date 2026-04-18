@@ -8,6 +8,7 @@ import PipelineStatusBar from "./components/PipelineStatusBar";
 import SettingsPage from "./components/SettingsPage";
 import SessionsBrowser from "./components/SessionsBrowser";
 import TokenUsagePanel from "./components/TokenUsagePanel";
+import Toast from "./components/Toast";
 import { useTauriEvents } from "./hooks/useTauriEvents";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useAudioGraphStore } from "./store";
@@ -84,6 +85,9 @@ function App() {
 
       {/* Sessions browser modal */}
       {sessionsBrowserOpen && <SessionsBrowser />}
+
+      {/* Ephemeral status toast (Gemini reconnect, etc.) */}
+      <Toast />
     </div>
   );
 }

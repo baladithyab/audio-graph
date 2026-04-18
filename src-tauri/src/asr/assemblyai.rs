@@ -193,16 +193,16 @@ impl AssemblyAIClient {
 
             let (atx, arx) = tokio_mpsc::unbounded_channel::<AudioCmd>();
 
-            let session_handle = tokio::spawn(session_task(
+            let session_handle = tokio::spawn(session_task(AssemblyAISessionCtx {
                 writer,
                 reader,
-                arx,
+                audio_rx: arx,
                 config,
                 event_tx,
                 connected,
                 user_disconnected,
                 pending_chunks,
-            ));
+            }));
 
             Ok::<_, String>((atx, session_handle))
         })?;
@@ -385,20 +385,37 @@ fn backoff_for_attempt(attempt: u32) -> Option<u64> {
     }
 }
 
-/// Background task owning a single AssemblyAI WebSocket session, including
-/// reconnect logic. Mirrors the Deepgram `session_task` structure — see
-/// comments there for full design rationale.
-#[allow(clippy::too_many_arguments)] // loop-14 A2: context-struct refactor deferred to loop 15
-async fn session_task(
-    initial_writer: WsWriter,
-    initial_reader: WsReader,
-    mut audio_rx: tokio_mpsc::UnboundedReceiver<AudioCmd>,
+/// Bundles everything `session_task` owns for a single AssemblyAI session:
+/// the split WebSocket halves, the audio command receiver, live config,
+/// the outbound event channel, and the three shared atomics. Collapses an
+/// 8-arg function signature to one — see `speech/context.rs` for the same
+/// pattern applied to the speech workers.
+struct AssemblyAISessionCtx {
+    writer: WsWriter,
+    reader: WsReader,
+    audio_rx: tokio_mpsc::UnboundedReceiver<AudioCmd>,
     config: AssemblyAIConfig,
     event_tx: crossbeam_channel::Sender<AssemblyAIEvent>,
     connected: Arc<AtomicBool>,
     user_disconnected: Arc<AtomicBool>,
     pending_chunks: Arc<std::sync::atomic::AtomicUsize>,
-) {
+}
+
+/// Background task owning a single AssemblyAI WebSocket session, including
+/// reconnect logic. Mirrors the Deepgram `session_task` structure — see
+/// comments there for full design rationale.
+async fn session_task(ctx: AssemblyAISessionCtx) {
+    let AssemblyAISessionCtx {
+        writer: initial_writer,
+        reader: initial_reader,
+        mut audio_rx,
+        config,
+        event_tx,
+        connected,
+        user_disconnected,
+        pending_chunks,
+    } = ctx;
+
     let mut writer = initial_writer;
     let mut reader = initial_reader;
     let mut reconnect_attempts: u32 = 0;

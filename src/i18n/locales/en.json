@@ -164,6 +164,10 @@
     "turns_other": "{{count}} turns",
     "turnsTooltip": "Number of turn_complete frames with usage metadata",
     "reset": "Reset",
+    "session": "Session",
+    "lifetime": "Lifetime",
+    "clearAll": "Clear All",
+    "clearAllConfirm": "Clear both Session and Lifetime token totals? This cannot be undone.",
     "lastTurn": "Last turn: {{total}} tokens",
     "lastTurnTooltip": "Total tokens reported on the most recent turn_complete"
   }

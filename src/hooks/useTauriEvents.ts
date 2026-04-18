@@ -1,5 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
+import i18n from "../i18n";
+import { showToast } from "../components/Toast";
 import { useAudioGraphStore } from "../store";
 import type {
     TranscriptSegment,
@@ -134,16 +136,14 @@ export function useTauriEvents(): void {
                         // The backend might disconnect — update frontend state
                         useAudioGraphStore.setState({ isGeminiActive: false });
                     } else if (statusType === "reconnected") {
-                        // Distinguish resumed vs. fresh reconnects so
-                        // operators can tell from devtools whether prior
-                        // turn context survived the outage. TODO(designer):
-                        // promote this to a toast / status chip; keys live
-                        // under `gemini.reconnect.{resumed,fresh}`.
-                        console.info(
-                            resumed
-                                ? "Gemini: reconnected with resumption handle (prior context requested)"
-                                : "Gemini: reconnected without resumption (fresh session)",
-                        );
+                        showToast({
+                            variant: resumed ? "success" : "info",
+                            message: i18n.t(
+                                resumed
+                                    ? "gemini.reconnect.resumed"
+                                    : "gemini.reconnect.fresh",
+                            ),
+                        });
                     }
                 }),
             );

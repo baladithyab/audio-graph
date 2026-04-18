@@ -233,16 +233,16 @@ impl DeepgramStreamingClient {
 
             // Spawn the session task, which owns both halves of the socket
             // and handles reconnects internally.
-            let session_handle = tokio::spawn(session_task(
+            let session_handle = tokio::spawn(session_task(DeepgramSessionCtx {
                 writer,
                 reader,
-                arx,
+                audio_rx: arx,
                 config,
                 event_tx,
                 connected,
                 user_disconnected,
-                Arc::clone(&pending_chunks),
-            ));
+                pending_chunks: Arc::clone(&pending_chunks),
+            }));
 
             Ok::<_, String>((atx, session_handle))
         })?;
@@ -469,6 +469,22 @@ fn backoff_for_attempt(attempt: u32) -> Option<u64> {
     }
 }
 
+/// Bundles everything `session_task` owns for a single Deepgram session:
+/// the split WebSocket halves, the audio command receiver, live config,
+/// the outbound event channel, and the three shared atomics. Collapses an
+/// 8-arg function signature to one — see `speech/context.rs` for the same
+/// pattern applied to the speech workers.
+struct DeepgramSessionCtx {
+    writer: WsWriter,
+    reader: WsReader,
+    audio_rx: tokio_mpsc::UnboundedReceiver<AudioCmd>,
+    config: DeepgramConfig,
+    event_tx: crossbeam_channel::Sender<DeepgramEvent>,
+    connected: Arc<AtomicBool>,
+    user_disconnected: Arc<AtomicBool>,
+    pending_chunks: Arc<std::sync::atomic::AtomicUsize>,
+}
+
 /// Background task owning a single Deepgram WebSocket session, including
 /// reconnect logic.
 ///
@@ -486,17 +502,18 @@ fn backoff_for_attempt(attempt: u32) -> Option<u64> {
 ///    comes back.
 /// 6. On failure, loops back to step 2 with the incremented attempt count.
 /// 7. After 4 failed attempts, emits a fatal `Error` event and exits.
-#[allow(clippy::too_many_arguments)] // loop-14 A2: context-struct refactor deferred to loop 15
-async fn session_task(
-    initial_writer: WsWriter,
-    initial_reader: WsReader,
-    mut audio_rx: tokio_mpsc::UnboundedReceiver<AudioCmd>,
-    config: DeepgramConfig,
-    event_tx: crossbeam_channel::Sender<DeepgramEvent>,
-    connected: Arc<AtomicBool>,
-    user_disconnected: Arc<AtomicBool>,
-    pending_chunks: Arc<std::sync::atomic::AtomicUsize>,
-) {
+async fn session_task(ctx: DeepgramSessionCtx) {
+    let DeepgramSessionCtx {
+        writer: initial_writer,
+        reader: initial_reader,
+        mut audio_rx,
+        config,
+        event_tx,
+        connected,
+        user_disconnected,
+        pending_chunks,
+    } = ctx;
+
     let mut writer = initial_writer;
     let mut reader = initial_reader;
     let mut reconnect_attempts: u32 = 0;

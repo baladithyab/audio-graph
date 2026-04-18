@@ -164,6 +164,10 @@
     "turns_other": "{{count}} turnos",
     "turnsTooltip": "Número de quadros turn_complete com metadados de uso",
     "reset": "Redefinir",
+    "session": "Sessão",
+    "lifetime": "Vitalício",
+    "clearAll": "Limpar Tudo",
+    "clearAllConfirm": "Limpar totais de tokens de Sessão e Vitalício? Esta ação não pode ser desfeita.",
     "lastTurn": "Último turno: {{total}} tokens",
     "lastTurnTooltip": "Total de tokens reportados no último turn_complete"
   }
