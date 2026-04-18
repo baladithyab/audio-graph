@@ -189,7 +189,7 @@ mod tests {
         let err = std::io::Error::from_raw_os_error(13);
         assert!(!is_storage_full(&err));
 
-        let other = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let other = std::io::Error::other("boom");
         assert!(!is_storage_full(&other));
     }
 }
