@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod usage;
+
 /// Serializes read-modify-write access to `sessions.json` within this process.
 ///
 /// Concurrent writers (e.g. the 30s graph-autosave tick calling `update_stats`

@@ -54,6 +54,23 @@ pub fn run() {
         log::warn!("Failed to register session in index: {}", e);
     }
 
+    // Surface any persisted token usage from the most-recent prior session
+    // so operators can confirm persistence survived the restart. The
+    // frontend will wire this to the UI in a later loop; for now it's a
+    // log breadcrumb + the `get_session_usage` command is registered below.
+    {
+        let prior = sessions::load_index();
+        if let Some(most_recent) = prior.iter().find(|s| s.id != app_state.session_id) {
+            let usage = sessions::usage::load_usage(&most_recent.id);
+            log::info!(
+                "Session restored from prior run {}: {} turns, {} total tokens",
+                most_recent.id,
+                usage.turns,
+                usage.total
+            );
+        }
+    }
+
     // Spawn graph auto-save background thread (saves every 30s, also refreshes
     // session index stats: segment/speaker/entity counts).
     {
@@ -127,6 +144,9 @@ pub fn run() {
             commands::list_sessions,
             commands::load_session_transcript,
             commands::delete_session,
+            commands::get_session_usage,
+            commands::get_current_session_usage,
+            commands::new_session_cmd,
             // Credential management
             commands::save_credential_cmd,
             commands::load_credential_cmd,

@@ -162,6 +162,32 @@
       "closeModal": "Close any open modal"
     }
   },
+  "express": {
+    "title": "Quick Setup",
+    "intro": "Pick an ASR and LLM provider to get started. You can change everything later in Settings.",
+    "asrProvider": "ASR (speech-to-text) provider",
+    "llmProvider": "LLM (chat) provider",
+    "apiKey": "API Key",
+    "optional": "Also use Gemini Live for real-time transcription",
+    "advanced": "Advanced Settings",
+    "saveAndStart": "Save & Start",
+    "saving": "Saving…",
+    "skip": "Skip setup",
+    "showKey": "Show",
+    "hideKey": "Hide",
+    "asrOptions": {
+      "gemini": "Gemini (cloud)",
+      "deepgram": "Deepgram (cloud)",
+      "assemblyai": "AssemblyAI (cloud)",
+      "local_whisper": "Local Whisper (offline)"
+    },
+    "llmOptions": {
+      "openai": "OpenAI (cloud)",
+      "anthropic": "Anthropic (cloud)",
+      "local_llama": "Local Llama (offline)",
+      "openrouter": "OpenRouter (cloud)"
+    }
+  },
   "tokens": {
     "title": "Gemini Token Usage",
     "empty": "No token usage reported yet. Start Gemini Live to accumulate totals.",

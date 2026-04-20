@@ -1349,6 +1349,7 @@ pub async fn start_gemini(state: State<'_, AppState>, app: tauri::AppHandle) -> 
                 .read()
                 .map(|s| s.llm_provider.clone())
                 .unwrap_or_default();
+            let session_id = state.session_id.clone();
 
             let handle = std::thread::Builder::new()
                 .name("gemini-event-receiver".to_string())
@@ -1423,6 +1424,49 @@ pub async fn start_gemini(state: State<'_, AppState>, app: tauri::AppHandle) -> 
                                 } else {
                                     log::debug!("Gemini: turn complete");
                                 }
+
+                                // Persist per-session token totals (loop 19).
+                                // Before this, turn counts + token totals only
+                                // lived in the frontend's localStorage and did
+                                // not survive an app restart.
+                                let delta = crate::sessions::usage::TurnDelta {
+                                    prompt: usage
+                                        .as_ref()
+                                        .and_then(|u| u.prompt_token_count)
+                                        .unwrap_or(0)
+                                        as u64,
+                                    response: usage
+                                        .as_ref()
+                                        .and_then(|u| u.response_token_count)
+                                        .unwrap_or(0)
+                                        as u64,
+                                    cached: usage
+                                        .as_ref()
+                                        .and_then(|u| u.cached_content_token_count)
+                                        .unwrap_or(0)
+                                        as u64,
+                                    thoughts: usage
+                                        .as_ref()
+                                        .and_then(|u| u.thoughts_token_count)
+                                        .unwrap_or(0)
+                                        as u64,
+                                    tool_use: usage
+                                        .as_ref()
+                                        .and_then(|u| u.tool_use_prompt_token_count)
+                                        .unwrap_or(0)
+                                        as u64,
+                                    total: usage
+                                        .as_ref()
+                                        .and_then(|u| u.total_token_count)
+                                        .unwrap_or(0)
+                                        as u64,
+                                };
+                                if let Err(e) =
+                                    crate::sessions::usage::append_turn(&session_id, delta)
+                                {
+                                    log::warn!("Failed to persist turn usage: {}", e);
+                                }
+
                                 let _ = app_handle.emit(events::GEMINI_STATUS, &event);
                             }
                             GeminiEvent::Disconnected => {
@@ -1732,6 +1776,71 @@ pub fn delete_session(session_id: String) -> Result<(), String> {
         _ => {}
     }
     Ok(())
+}
+
+/// Load the token-usage record for a session from
+/// `~/.audiograph/usage/<session_id>.json`. Missing or malformed files
+/// resolve to a zeroed record — callers never have to disambiguate.
+#[tauri::command]
+pub fn get_session_usage(
+    session_id: String,
+) -> Result<crate::sessions::usage::SessionUsage, String> {
+    validate_session_id(&session_id)?;
+    Ok(crate::sessions::usage::load_usage(&session_id))
+}
+
+/// Load the token-usage record for the CURRENT session. Convenience wrapper
+/// so the frontend can restore its in-memory totals on startup without first
+/// having to fetch `get_session_id`.
+#[tauri::command]
+pub fn get_current_session_usage(
+    state: State<'_, AppState>,
+) -> Result<crate::sessions::usage::SessionUsage, String> {
+    Ok(crate::sessions::usage::load_usage(&state.session_id))
+}
+
+/// Flush the current session and return the ID of a freshly-initialized
+/// usage file for a future session.
+///
+/// What this does right now (narrow loop-19 slice):
+///   1. Persists a zeroed usage file for a newly generated session UUID so
+///      the caller can bind to it immediately.
+///   2. Marks the *current* session's sessions-index entry as "complete" and
+///      flushes its usage record one last time (no-op if already up-to-date).
+///
+/// What this does NOT do (deferred to loop 20):
+///   - Rotate `AppState::session_id` in place. The running transcript writer
+///     and graph autosave threads keep writing under the original UUID until
+///     the process restarts. A true mid-process rotation needs to respawn
+///     both threads and is more work than this loop budgets. The returned
+///     UUID lets the frontend show "new session started" affordance; the
+///     backing capture still belongs to the old session until restart.
+#[tauri::command]
+pub fn new_session_cmd(state: State<'_, AppState>) -> Result<String, String> {
+    // 1. Finalize current session's index entry. Best-effort: a failed
+    //    finalize must not prevent us handing the caller a fresh UUID.
+    if let Err(e) = crate::sessions::finalize_session(&state.session_id) {
+        log::warn!("new_session_cmd: finalize current failed: {}", e);
+    }
+
+    // 2. Re-save the current session's usage record. If the file is missing
+    //    this is a harmless zero-write; if it exists, `save_usage` is a
+    //    no-op rewrite of the same bytes. Either way, it guarantees the
+    //    file is present on disk before the caller moves on.
+    let current = crate::sessions::usage::load_usage(&state.session_id);
+    if let Err(e) = crate::sessions::usage::save_usage(&current) {
+        log::warn!("new_session_cmd: save current usage failed: {}", e);
+    }
+
+    // 3. Seed a fresh usage file for the next session.
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let fresh = crate::sessions::usage::SessionUsage {
+        session_id: new_id.clone(),
+        ..crate::sessions::usage::SessionUsage::default()
+    };
+    crate::sessions::usage::save_usage(&fresh)?;
+    log::info!("new_session_cmd: seeded fresh session {}", new_id);
+    Ok(new_id)
 }
 
 // ---------------------------------------------------------------------------

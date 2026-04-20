@@ -2013,3 +2013,64 @@
   font-size: 13px;
   text-align: right;
 }
+
+/* ==========================================================================
+   Express Setup (first-time quickstart)
+   ========================================================================== */
+
+.express-setup-modal {
+  max-width: 520px;
+}
+
+.express-setup-intro {
+  margin: 16px 24px 0;
+  color: var(--text-secondary, #a0a0b0);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.express-key-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.express-key-row .settings-input {
+  flex: 1;
+}
+
+.express-setup-error {
+  margin: 12px 24px;
+  padding: 10px 12px;
+  background: rgba(220, 60, 60, 0.12);
+  border: 1px solid rgba(220, 60, 60, 0.35);
+  border-radius: 6px;
+  color: #ff8080;
+  font-size: 13px;
+}
+
+.express-setup-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.express-setup-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.express-setup-advanced {
+  background: none;
+  border: none;
+  color: var(--text-secondary, #a0a0b0);
+  cursor: pointer;
+  font-size: 13px;
+  text-decoration: underline;
+  padding: 4px 0;
+}
+
+.express-setup-advanced:hover {
+  color: var(--text-primary, #e0e0e0);
+}
