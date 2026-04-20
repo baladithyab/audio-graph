@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import i18n from "../i18n";
 import { showToast } from "../components/Toast";
+import { publishStorageFull } from "../components/StorageBanner";
 import { useAudioGraphStore } from "../store";
 import type {
     TranscriptSegment,
@@ -85,19 +86,8 @@ export function useTauriEvents(): void {
 
             unlisten.push(
                 await listen<CaptureStorageFullPayload>(CAPTURE_STORAGE_FULL, (event) => {
-                    // Disk-full is fatal for the current capture: the writer
-                    // thread has already dropped the buffer it was trying to
-                    // persist. Surface a user-friendly error so the operator
-                    // can free space and restart the session. Mirrors the
-                    // `capture-error` subscription pattern above.
-                    const { path, bytes_lost } = event.payload;
                     console.error("Storage full:", event.payload);
-                    const kb = Math.max(1, Math.round(bytes_lost / 1024));
-                    setError(
-                        `Storage full while writing ${path}. ` +
-                            `${kb} KB of transcript/graph data was lost. ` +
-                            `Free disk space and restart the session.`,
-                    );
+                    publishStorageFull(event.payload);
                 }),
             );
 

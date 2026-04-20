@@ -13,6 +13,7 @@ import ShortcutsHelpModal from "./components/ShortcutsHelpModal";
 import ExpressSetup from "./components/ExpressSetup";
 import TokenUsagePanel from "./components/TokenUsagePanel";
 import Toast from "./components/Toast";
+import StorageBanner from "./components/StorageBanner";
 import { useTauriEvents } from "./hooks/useTauriEvents";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useAudioGraphStore } from "./store";
@@ -106,6 +107,7 @@ function App() {
 
   return (
     <div className="app-container">
+      <StorageBanner />
       <ControlBar />
       <div className="main-layout">
         <aside className="left-panel">

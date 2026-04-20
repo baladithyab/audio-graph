@@ -151,6 +151,12 @@
       "fresh": "Gemini reconnected as a fresh session — prior context lost."
     }
   },
+  "storage": {
+    "title": "Storage full",
+    "message": "Storage full — capture paused. Free up space and click Resume.",
+    "resume": "Resume",
+    "dismiss": "Dismiss"
+  },
   "shortcuts": {
     "title": "Keyboard Shortcuts",
     "close": "Close shortcuts help",
@@ -201,6 +207,8 @@
     "turns_other": "{{count}} turns",
     "turnsTooltip": "Number of turn_complete frames with usage metadata",
     "reset": "Reset",
+    "newSession": "New Session",
+    "newSessionTooltip": "Finalize the current session on disk and start a fresh one. Lifetime totals are preserved.",
     "session": "Session",
     "lifetime": "Lifetime",
     "clearAll": "Clear All",

@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { GeminiStatusEvent, UsageMetadata } from "../types";
+import type {
+    GeminiStatusEvent,
+    LifetimeUsage,
+    SessionUsage,
+    UsageMetadata,
+} from "../types";
 
 const GEMINI_STATUS = "gemini-status";
 const SESSION_KEY = "tokens.session.v1";
@@ -95,11 +101,67 @@ function removeKey(key: string): void {
     }
 }
 
+function sessionUsageToTotals(u: SessionUsage): Totals {
+    return {
+        prompt: u.prompt,
+        response: u.response,
+        cached: u.cached,
+        thoughts: u.thoughts,
+        toolUse: u.tool_use,
+        total: u.total,
+        turns: u.turns,
+    };
+}
+
+function lifetimeUsageToTotals(u: LifetimeUsage): Totals {
+    return {
+        prompt: u.prompt,
+        response: u.response,
+        cached: u.cached,
+        thoughts: u.thoughts,
+        toolUse: u.tool_use,
+        total: u.total,
+        turns: u.turns,
+    };
+}
+
 function TokenUsagePanel() {
     const { t } = useTranslation();
+    // Initial state hydrates from localStorage so the cells never flash empty
+    // during the async backend round-trip. Backend values overwrite this once
+    // the mount-effect `invoke`s resolve.
     const [session, setSession] = useState<Totals>(() => loadTotals(SESSION_KEY));
     const [lifetime, setLifetime] = useState<Totals>(() => loadTotals(LIFETIME_KEY));
     const [lastUsage, setLastUsage] = useState<UsageMetadata | null>(null);
+
+    // Backend hydration. Happens once on mount. If the Tauri command fails
+    // (e.g. during dev in a browser without Tauri, or if the backend isn't
+    // ready), we keep whatever localStorage gave us — see the lazy initializers
+    // above. The Promise.allSettled ensures a single command failing doesn't
+    // stall the other.
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            const [sessionResult, lifetimeResult] = await Promise.allSettled([
+                invoke<SessionUsage>("get_current_session_usage"),
+                invoke<LifetimeUsage>("get_lifetime_usage"),
+            ]);
+            if (cancelled) return;
+            if (sessionResult.status === "fulfilled") {
+                const next = sessionUsageToTotals(sessionResult.value);
+                setSession(next);
+                saveTotals(SESSION_KEY, next);
+            }
+            if (lifetimeResult.status === "fulfilled") {
+                const next = lifetimeUsageToTotals(lifetimeResult.value);
+                setLifetime(next);
+                saveTotals(LIFETIME_KEY, next);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     useEffect(() => {
         let unlisten: (() => void) | null = null;
@@ -154,6 +216,30 @@ function TokenUsagePanel() {
         removeKey(LIFETIME_KEY);
     }, [t]);
 
+    // Finalize the current session on-disk, seed a fresh one, and re-hydrate
+    // the Session panel from the new zeroed file. Lifetime stays as-is —
+    // previous sessions still contribute to it.
+    const handleNewSession = useCallback(() => {
+        (async () => {
+            try {
+                await invoke<string>("new_session_cmd");
+            } catch {
+                // If the command fails, still clear the UI — the user's intent
+                // was to start fresh. Backend will rotate on next restart.
+            }
+            try {
+                const fresh = await invoke<SessionUsage>("get_current_session_usage");
+                const next = sessionUsageToTotals(fresh);
+                setSession(next);
+                saveTotals(SESSION_KEY, next);
+            } catch {
+                setSession(ZERO_TOTALS);
+                removeKey(SESSION_KEY);
+            }
+            setLastUsage(null);
+        })();
+    }, []);
+
     const hasSession = session.turns > 0;
     const hasLifetime = lifetime.turns > 0;
     const hasAny = hasSession || hasLifetime;
@@ -174,6 +260,15 @@ function TokenUsagePanel() {
                             {t("tokens.turns", { count: session.turns })}
                         </span>
                     )}
+                    <button
+                        type="button"
+                        className="panel-export-btn"
+                        onClick={handleNewSession}
+                        aria-label={t("tokens.newSession")}
+                        title={t("tokens.newSessionTooltip")}
+                    >
+                        {t("tokens.newSession")}
+                    </button>
                     <button
                         type="button"
                         className="panel-export-btn"

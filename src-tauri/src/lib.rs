@@ -46,11 +46,12 @@ pub fn run() {
     env_logger::init();
 
     let app_state = AppState::new();
+    let initial_session_id = app_state.current_session_id();
 
     // Register this session in the sessions index (~/.audiograph/sessions.json).
     // Also marks any prior "active" sessions as "crashed" so the UI can
     // distinguish clean shutdowns from crashes.
-    if let Err(e) = sessions::register_session(&app_state.session_id) {
+    if let Err(e) = sessions::register_session(&initial_session_id) {
         log::warn!("Failed to register session in index: {}", e);
     }
 
@@ -60,7 +61,7 @@ pub fn run() {
     // log breadcrumb + the `get_session_usage` command is registered below.
     {
         let prior = sessions::load_index();
-        if let Some(most_recent) = prior.iter().find(|s| s.id != app_state.session_id) {
+        if let Some(most_recent) = prior.iter().find(|s| s.id != initial_session_id) {
             let usage = sessions::usage::load_usage(&most_recent.id);
             log::info!(
                 "Session restored from prior run {}: {} turns, {} total tokens",
@@ -72,10 +73,13 @@ pub fn run() {
     }
 
     // Spawn graph auto-save background thread (saves every 30s, also refreshes
-    // session index stats: segment/speaker/entity counts).
+    // session index stats: segment/speaker/entity counts). The thread reads
+    // the current session_id via the shared Arc<RwLock<String>> on each tick
+    // so in-process rotation via `new_session_cmd` takes effect without a
+    // respawn.
     {
         let handle = persistence::spawn_graph_autosave(
-            &app_state.session_id,
+            app_state.session_id.clone(),
             app_state.knowledge_graph.clone(),
             app_state.transcript_buffer.clone(),
         );
@@ -84,8 +88,10 @@ pub fn run() {
         }
     }
 
-    // Capture session_id for the shutdown finalizer before moving app_state.
-    let session_id = app_state.session_id.clone();
+    // Capture the session_id handle for the shutdown finalizer. At Exit,
+    // we read the CURRENT session (may differ from `initial_session_id` if
+    // the user rotated via `new_session_cmd`).
+    let session_id_handle = app_state.session_id.clone();
 
     tauri::Builder::default()
         .manage(app_state)
@@ -146,6 +152,7 @@ pub fn run() {
             commands::delete_session,
             commands::get_session_usage,
             commands::get_current_session_usage,
+            commands::get_lifetime_usage,
             commands::new_session_cmd,
             // Credential management
             commands::save_credential_cmd,
@@ -168,10 +175,14 @@ pub fn run() {
             // the process is killed we rely on register_session()'s
             // "crashed" detection on the next launch.
             if let tauri::RunEvent::Exit = event {
-                if let Err(e) = crate::sessions::finalize_session(&session_id) {
-                    log::warn!("Failed to finalize session {}: {}", session_id, e);
+                let current_sid = match session_id_handle.read() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                if let Err(e) = crate::sessions::finalize_session(&current_sid) {
+                    log::warn!("Failed to finalize session {}: {}", current_sid, e);
                 } else {
-                    log::info!("Session {} finalized on exit", session_id);
+                    log::info!("Session {} finalized on exit", current_sid);
                 }
             }
         });

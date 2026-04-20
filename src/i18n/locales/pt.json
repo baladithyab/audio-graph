@@ -151,6 +151,12 @@
       "fresh": "Gemini reconectou como sessão nova — contexto anterior perdido."
     }
   },
+  "storage": {
+    "title": "Armazenamento cheio",
+    "message": "Armazenamento cheio — captura pausada. Libere espaço e clique em Retomar.",
+    "resume": "Retomar",
+    "dismiss": "Dispensar"
+  },
   "shortcuts": {
     "title": "Atalhos de Teclado",
     "close": "Fechar ajuda de atalhos",
@@ -201,6 +207,8 @@
     "turns_other": "{{count}} turnos",
     "turnsTooltip": "Número de quadros turn_complete com metadados de uso",
     "reset": "Redefinir",
+    "newSession": "Nova Sessão",
+    "newSessionTooltip": "Finaliza a sessão atual em disco e inicia uma nova. Os totais vitalícios são preservados.",
     "session": "Sessão",
     "lifetime": "Vitalício",
     "clearAll": "Limpar Tudo",

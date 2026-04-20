@@ -374,6 +374,40 @@ export interface SessionMetadata {
     graph_path: string;
 }
 
+/**
+ * Per-session token usage record returned by `get_session_usage` /
+ * `get_current_session_usage`. Matches Rust `sessions::usage::SessionUsage`
+ * (snake_case preserved by serde).
+ */
+export interface SessionUsage {
+    session_id: string;
+    prompt: number;
+    response: number;
+    cached: number;
+    thoughts: number;
+    tool_use: number;
+    total: number;
+    turns: number;
+    /** Unix millis of the last update; `0` means never updated. */
+    updated_at: number;
+}
+
+/**
+ * Aggregate token usage across every `~/.audiograph/usage/*.json` file.
+ * Returned by the `get_lifetime_usage` command. Has no `session_id` — it's
+ * a sum. `sessions` counts how many session files contributed.
+ */
+export interface LifetimeUsage {
+    prompt: number;
+    response: number;
+    cached: number;
+    thoughts: number;
+    tool_use: number;
+    total: number;
+    turns: number;
+    sessions: number;
+}
+
 // ---------------------------------------------------------------------------
 // Structured error payloads (matches Rust AppError enum)
 // ---------------------------------------------------------------------------

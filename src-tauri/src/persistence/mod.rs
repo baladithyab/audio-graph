@@ -284,9 +284,14 @@ use std::sync::{Arc, Mutex, RwLock};
 /// Spawn a background thread that auto-saves the knowledge graph every 30 seconds
 /// and refreshes the session index stats (segment/speaker/entity counts).
 ///
+/// `session_id` is shared via `Arc<RwLock<String>>` so
+/// [`AppState::rotate_session`](crate::state::AppState::rotate_session) can
+/// repoint the autosave target mid-run without respawning this thread. Each
+/// tick re-reads the current ID and recomputes `<graphs_dir>/<sid>.json`.
+///
 /// Returns the thread handle (or `None` if the graphs directory cannot be resolved).
 pub fn spawn_graph_autosave(
-    session_id: &str,
+    session_id: Arc<RwLock<String>>,
     knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
     transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
 ) -> Option<std::thread::JoinHandle<()>> {
@@ -296,15 +301,21 @@ pub fn spawn_graph_autosave(
         return None;
     }
 
-    let file_path = dir.join(format!("{}.json", session_id));
-    let session_id_owned = session_id.to_string();
-
     let handle = std::thread::Builder::new()
         .name("graph-autosave".to_string())
         .spawn(move || {
-            log::info!("Graph auto-save: started (every 30s → {:?})", file_path);
+            log::info!("Graph auto-save: started (every 30s → {:?})", dir);
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(30));
+
+                // Re-read session_id each tick so in-process rotation takes
+                // effect without a respawn. Poisoned lock → recover; the
+                // inner String has no broken invariant.
+                let current_sid = match session_id.read() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                let file_path = dir.join(format!("{}.json", current_sid));
 
                 // ── Graph snapshot: save to disk + capture entity count ────────
                 let entity_count: u64 = {
@@ -345,7 +356,7 @@ pub fn spawn_graph_autosave(
 
                 // ── Refresh session index stats ────────────────────────────────
                 if let Err(e) = crate::sessions::update_stats(
-                    &session_id_owned,
+                    &current_sid,
                     segment_count,
                     speaker_count,
                     entity_count,

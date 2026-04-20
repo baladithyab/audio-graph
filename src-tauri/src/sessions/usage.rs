@@ -132,6 +132,81 @@ pub fn save_usage(usage: &SessionUsage) -> Result<(), String> {
     Ok(())
 }
 
+/// Cumulative totals across *every* `~/.audiograph/usage/*.json` file.
+///
+/// Unlike [`SessionUsage`] this carries no `session_id` — it is an aggregate.
+/// `sessions` reports the count of individual session files that contributed
+/// to the sum, which the UI surfaces next to lifetime totals so users can
+/// tell at a glance how many sessions they're looking at.
+///
+/// Malformed / unreadable files are skipped (logged at `warn`). A single
+/// corrupt file must not zero out the user's lifetime counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifetimeUsage {
+    pub prompt: u64,
+    pub response: u64,
+    pub cached: u64,
+    pub thoughts: u64,
+    pub tool_use: u64,
+    pub total: u64,
+    pub turns: u64,
+    pub sessions: u64,
+}
+
+/// Sum every session's on-disk totals. Directory missing → zeroed record
+/// (e.g. brand new install). Uses saturating-add for the same reason
+/// [`append_turn`] does: a runaway counter must not wrap to zero.
+pub fn load_lifetime_usage() -> LifetimeUsage {
+    let dir = match usage_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!(
+                "lifetime usage: cannot resolve usage dir ({}), returning zero",
+                e
+            );
+            return LifetimeUsage::default();
+        }
+    };
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("lifetime usage: read_dir {:?} failed: {}", dir, e);
+            return LifetimeUsage::default();
+        }
+    };
+    let mut acc = LifetimeUsage::default();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only .json files; skip .json.tmp leftovers from interrupted writes.
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let contents = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("lifetime usage: read {:?} failed: {}", path, e);
+                continue;
+            }
+        };
+        let u: SessionUsage = match serde_json::from_str(&contents) {
+            Ok(u) => u,
+            Err(e) => {
+                log::warn!("lifetime usage: parse {:?} failed: {}", path, e);
+                continue;
+            }
+        };
+        acc.prompt = acc.prompt.saturating_add(u.prompt);
+        acc.response = acc.response.saturating_add(u.response);
+        acc.cached = acc.cached.saturating_add(u.cached);
+        acc.thoughts = acc.thoughts.saturating_add(u.thoughts);
+        acc.tool_use = acc.tool_use.saturating_add(u.tool_use);
+        acc.total = acc.total.saturating_add(u.total);
+        acc.turns = acc.turns.saturating_add(u.turns);
+        acc.sessions = acc.sessions.saturating_add(1);
+    }
+    acc
+}
+
 /// Add one turn's counters to the session's on-disk totals. Uses
 /// saturating-add so a runaway provider counter can never wrap into zero.
 pub fn append_turn(session_id: &str, delta: TurnDelta) -> Result<SessionUsage, String> {
@@ -307,6 +382,48 @@ mod tests {
 
         let reloaded = load_usage(sid);
         assert_eq!(reloaded, after);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lifetime_usage_sums_across_session_files() {
+        let _lock = USAGE_TEST_LOCK.lock().unwrap();
+        let dir = unique_tempdir("lifetime");
+        let _g = HomeGuard::set(&dir);
+
+        // Empty directory (usage_dir creates it lazily) → zero.
+        let zero = load_lifetime_usage();
+        assert_eq!(zero, LifetimeUsage::default());
+
+        // Write three session files with known totals, plus a stray .tmp
+        // (should be skipped) and a malformed file (should be skipped
+        // without zeroing the aggregate).
+        for (sid, total, turns) in [("s-a", 100u64, 1u64), ("s-b", 250, 3), ("s-c", 50, 2)] {
+            let u = SessionUsage {
+                session_id: sid.to_string(),
+                prompt: total / 2,
+                response: total / 2,
+                total,
+                turns,
+                ..SessionUsage::default()
+            };
+            save_usage(&u).unwrap();
+        }
+        // .tmp leftover — must be ignored.
+        let tmp_path = usage_dir().unwrap().join("halfwritten.json.tmp");
+        fs::write(&tmp_path, b"{}").unwrap();
+        // Malformed .json — must be skipped without blowing up the sum.
+        let bad_path = usage_dir().unwrap().join("broken.json");
+        fs::write(&bad_path, b"not json").unwrap();
+
+        let life = load_lifetime_usage();
+        assert_eq!(life.total, 400);
+        assert_eq!(life.turns, 6);
+        assert_eq!(life.prompt, 200);
+        assert_eq!(life.response, 200);
+        // 3 good files contributed; broken.json was skipped.
+        assert_eq!(life.sessions, 3);
 
         let _ = fs::remove_dir_all(&dir);
     }
