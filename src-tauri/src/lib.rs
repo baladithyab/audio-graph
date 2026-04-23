@@ -82,6 +82,7 @@ pub fn run() {
             app_state.session_id.clone(),
             app_state.knowledge_graph.clone(),
             app_state.transcript_buffer.clone(),
+            app_state.rotation_in_progress.clone(),
         );
         if let Ok(mut guard) = app_state.graph_autosave_thread.lock() {
             *guard = handle;

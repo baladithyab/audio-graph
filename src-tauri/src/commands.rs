@@ -1892,8 +1892,27 @@ pub fn new_session_cmd(state: State<'_, AppState>) -> Result<String, String> {
     // 4. Rotate in-process. `rotate_session` swaps the session_id Arc and
     //    respawns the transcript writer; the autosave + gemini-event
     //    threads pick up the change on their next iteration.
-    let rotated_from = state.rotate_session(&new_id);
-    debug_assert_eq!(rotated_from, previous_id);
+    //
+    //    Concurrent-rotate guard: if another rotation is already in flight,
+    //    skip and return the current session ID. The caller sees a successful
+    //    rotation either way (the in-flight rotate will land a fresh ID);
+    //    they just don't get the one *we* seeded. The usage file we wrote in
+    //    step 3 is then orphaned — harmless, since seed files are zeroed and
+    //    `load_usage` handles missing/extra entries.
+    match state.rotate_session(&new_id) {
+        crate::state::RotateOutcome::Rotated(rotated_from) => {
+            debug_assert_eq!(rotated_from, previous_id);
+        }
+        crate::state::RotateOutcome::AlreadyRotating(current) => {
+            log::warn!(
+                "new_session_cmd: concurrent rotation detected; returning current id {} \
+                 instead of freshly-seeded {}",
+                current,
+                new_id
+            );
+            return Ok(current);
+        }
+    }
 
     // 5. Register new session in the index so it shows up in list_sessions
     //    (status "active"). Best-effort: failure just means the UI won't

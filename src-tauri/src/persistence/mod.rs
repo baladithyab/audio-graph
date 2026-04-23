@@ -120,7 +120,10 @@ pub enum TranscriptWriteMsg {
 /// Handle to the transcript writer thread.
 pub struct TranscriptWriter {
     tx: mpsc::Sender<TranscriptWriteMsg>,
-    _handle: std::thread::JoinHandle<()>,
+    /// Writer thread handle. Taken by `shutdown_with_timeout` so the caller
+    /// can wait on it with a bounded timeout; left as `None` after that.
+    /// On drop-without-shutdown the handle is simply released (detached).
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl TranscriptWriter {
@@ -206,7 +209,7 @@ impl TranscriptWriter {
 
         Some(Self {
             tx,
-            _handle: handle,
+            handle: Some(handle),
         })
     }
 
@@ -219,8 +222,64 @@ impl TranscriptWriter {
     }
 
     /// Signal the writer to flush and shut down.
+    ///
+    /// Non-blocking: sends the `Shutdown` message and returns. The thread
+    /// will exit on its own after draining the channel. Use
+    /// [`Self::shutdown_with_timeout`] when the caller needs bounded assurance
+    /// that flush completed before moving on.
     pub fn shutdown(&self) {
         let _ = self.tx.send(TranscriptWriteMsg::Shutdown);
+    }
+
+    /// Signal shutdown and wait (up to `timeout`) for the writer thread to exit.
+    ///
+    /// Returns `true` if the thread joined within the timeout, `false` if the
+    /// wait expired (the thread is left detached — it will eventually exit on
+    /// its own when the underlying I/O unsticks, or be torn down at process
+    /// exit). On `false` the caller should assume some un-flushed segments may
+    /// still be in the writer's BufWriter and proceed with spawning a new
+    /// writer anyway — the alternative is blocking the rotation IPC
+    /// indefinitely on a wedged disk, which is worse than a rare lost tail.
+    ///
+    /// Implementation note: `JoinHandle::join` is blocking with no timeout
+    /// overload in std. We move the handle into a watchdog thread that
+    /// performs the join, and signal completion via a `mpsc` channel so the
+    /// calling thread can `recv_timeout`. On timeout the watchdog is itself
+    /// leaked — the JoinHandle inside it prevents the writer thread from
+    /// becoming a true zombie, just an unobserved one.
+    pub fn shutdown_with_timeout(mut self, timeout: std::time::Duration) -> bool {
+        let _ = self.tx.send(TranscriptWriteMsg::Shutdown);
+        let Some(handle) = self.handle.take() else {
+            return true;
+        };
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        // Watchdog thread: blocks on join, then signals. If join panics in the
+        // writer thread we still signal (the `Err` from join is just a panic
+        // propagation; we're shutting down anyway).
+        let spawned = std::thread::Builder::new()
+            .name("transcript-writer-join".to_string())
+            .spawn(move || {
+                let _ = handle.join();
+                let _ = done_tx.send(());
+            });
+        match spawned {
+            Ok(_watchdog) => {
+                // `_watchdog`'s JoinHandle is dropped here (detached). That's
+                // fine: its lifetime is bounded by the writer thread's join,
+                // which is what we want. We wait on done_rx only.
+                done_rx.recv_timeout(timeout).is_ok()
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to spawn transcript-writer-join watchdog: {} — \
+                     writer thread is detached",
+                    e
+                );
+                // Couldn't spawn the watchdog; we can't bound the wait, so
+                // report "timed out" rather than block the caller.
+                false
+            }
+        }
     }
 }
 
@@ -299,13 +358,20 @@ use std::sync::{Arc, Mutex, RwLock};
 /// `session_id` is shared via `Arc<RwLock<String>>` so
 /// [`AppState::rotate_session`](crate::state::AppState::rotate_session) can
 /// repoint the autosave target mid-run without respawning this thread. Each
-/// tick re-reads the current ID and recomputes `<graphs_dir>/<sid>.json`.
+/// tick snapshots the current ID once at entry and uses that single value for
+/// both the file path *and* the `update_stats` call — so even if a rotation
+/// lands mid-tick, the tick's writes all target the same session.
+///
+/// `rotation_in_progress` is the shared guard from `AppState`: if a rotation
+/// is actively swapping the writer/session_id when the tick fires, we skip
+/// this tick and wait for the next one rather than race the rotation.
 ///
 /// Returns the thread handle (or `None` if the graphs directory cannot be resolved).
 pub fn spawn_graph_autosave(
     session_id: Arc<RwLock<String>>,
     knowledge_graph: Arc<Mutex<TemporalKnowledgeGraph>>,
     transcript_buffer: Arc<RwLock<VecDeque<TranscriptSegment>>>,
+    rotation_in_progress: Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<std::thread::JoinHandle<()>> {
     let dir = graphs_dir()?;
     if let Err(e) = ensure_dir(&dir) {
@@ -320,8 +386,21 @@ pub fn spawn_graph_autosave(
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(30));
 
-                // Re-read session_id each tick so in-process rotation takes
-                // effect without a respawn. Poisoned lock → recover; the
+                // If a rotation is mid-flight, skip this tick. The in-flight
+                // rotation will land soon; the next tick (at most 30s later)
+                // will observe the new session ID atomically. Avoids the
+                // window where we could write graph state to the old session
+                // file concurrently with the writer-respawn for the new one.
+                if rotation_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+                    log::debug!("Graph auto-save: skipping tick (rotation in progress)");
+                    continue;
+                }
+
+                // Snapshot session_id ONCE at tick entry. Every subsequent
+                // write in this tick uses `current_sid` — never re-reads
+                // `session_id` — so the file path and the stats update are
+                // guaranteed to target the same session even if a rotation
+                // lands between sub-steps. Poisoned lock → recover; the
                 // inner String has no broken invariant.
                 let current_sid = match session_id.read() {
                     Ok(g) => g.clone(),
@@ -367,6 +446,9 @@ pub fn spawn_graph_autosave(
                 };
 
                 // ── Refresh session index stats ────────────────────────────────
+                // Pass the tick-start-cached `current_sid`, NOT a fresh read
+                // of session_id, so the stats update matches the file we
+                // just wrote above.
                 if let Err(e) = crate::sessions::update_stats(
                     &current_sid,
                     segment_count,
