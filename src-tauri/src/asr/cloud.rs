@@ -1,3 +1,21 @@
+//! Generic cloud-ASR worker contract.
+//!
+//! [`CloudAsrConfig`] is the minimal configuration shape shared by the
+//! plain HTTP/OpenAI-compatible streaming backends (Groq, OpenAI-style
+//! Whisper endpoints, etc.) — provider-specific backends like Deepgram,
+//! AssemblyAI, and AWS Transcribe Streaming each live in their own
+//! sibling module because their wire protocols, auth, and session
+//! lifetimes differ enough to warrant it.
+//!
+//! The `CloudAsrWorker` in this module takes a [`SpeechSegment`] off the
+//! input channel, POSTs the PCM payload to `endpoint` with the API key,
+//! and emits a [`TranscriptSegment`] downstream. Unlike the WebSocket
+//! providers this worker is request/response per utterance; there is no
+//! long-lived connection and no reconnect state machine.
+//!
+//! See also: [`crate::asr::deepgram`], [`crate::asr::assemblyai`],
+//! [`crate::asr::aws_transcribe`].
+
 use uuid::Uuid;
 
 use crate::state::TranscriptSegment;

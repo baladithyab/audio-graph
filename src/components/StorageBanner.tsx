@@ -1,3 +1,21 @@
+/**
+ * Top-of-window banner shown when the backend reports storage-full
+ * (`CAPTURE_STORAGE_FULL`) on a transcript or graph write.
+ *
+ * Payloads reach this component via a module-level publisher —
+ * `useTauriEvents` calls `publishStorageFull(payload)` when the backend
+ * event fires, and all mounted `StorageBanner` instances (only one, at
+ * the App root) receive it through a local listener set. This indirection
+ * lets the hook emit into a React component without coupling either to
+ * the store.
+ *
+ * The "Retry" button invokes `retry_storage_write` on the backend (see
+ * `persistence::retry_storage_write`): on success the banner dismisses;
+ * on failure the banner stays up with a "still full" hint so the user
+ * knows they still need to free space.
+ *
+ * Parent: `App.tsx`. No props.
+ */
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";

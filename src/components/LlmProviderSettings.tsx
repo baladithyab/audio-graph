@@ -1,3 +1,19 @@
+/**
+ * LLM provider sub-form — the choose-your-LLM surface inside
+ * `SettingsPage` (used for both entity extraction and chat).
+ *
+ * Renders backend-specific panels based on `llmType`:
+ *   - `local_llama` — GGUF model path + llama.cpp-2 inference params.
+ *   - `mistralrs`   — GGUF path + mistral.rs / Candle-based engine.
+ *   - `api`         — OpenAI-compatible endpoint (works for OpenAI,
+ *                     OpenRouter, Ollama, LM Studio, vLLM, Together,
+ *                     Groq) + API key + model string.
+ *   - `aws_bedrock` — region + credential-mode selector + Bedrock model
+ *                     ID.
+ *
+ * Parent: `SettingsPage.tsx`. Props mirror `AsrProviderSettings`: a
+ * narrowed reducer slice + dispatch + translation handle + `testingKey`.
+ */
 import type { Dispatch, ReactNode } from "react";
 import type { TFunction } from "i18next";
 import { invoke } from "@tauri-apps/api/core";

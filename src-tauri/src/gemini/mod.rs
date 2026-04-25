@@ -31,7 +31,7 @@
 //! server-initiated `goAway`/Close, automatically reconnects with exponential
 //! backoff (1 s / 2 s / 5 s / 10 s, then gives up). Mirrors the pattern used
 //! in [`crate::asr::deepgram`] and [`crate::asr::assemblyai`], with one extra
-//! Gemini-specific step on each reconnect: [`open_ws`] re-runs the full setup
+//! Gemini-specific step on each reconnect: `open_ws` re-runs the full setup
 //! handshake (send `BidiGenerateContentSetup` → await `setupComplete`) before
 //! returning the fresh reader/writer halves. `Reconnecting` and `Reconnected`
 //! events are emitted so consumers (see `commands.rs`) can surface the state.
@@ -79,7 +79,7 @@ pub enum GeminiErrorCategory {
     /// Invalid / missing API key — reauthentication required.
     Auth,
     /// Token / session credential has expired and needs refreshing. Distinct
-    /// from [`Auth`] because the remediation differs (refresh vs. reconfigure).
+    /// from [`Self::Auth`] because the remediation differs (refresh vs. reconfigure).
     AuthExpired,
     /// Quota / rate-limit exceeded. `retry_after_secs` mirrors the HTTP
     /// `Retry-After` header (or close-frame hint) when the server includes
@@ -312,7 +312,7 @@ impl GeminiLiveClient {
     /// been received, then spawns a background session task on an internal
     /// tokio runtime. The session task handles audio writing, server message
     /// reading, and automatic reconnection with exponential backoff if the
-    /// WebSocket drops mid-session (see [`session_task`]).
+    /// WebSocket drops mid-session (see `session_task` in this module).
     pub fn connect(&mut self) -> Result<(), String> {
         // Validate auth configuration before proceeding.
         match &self.config.auth {

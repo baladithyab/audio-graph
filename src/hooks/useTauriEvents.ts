@@ -1,3 +1,33 @@
+/**
+ * Tauri backend-event bridge.
+ *
+ * Call `useTauriEvents()` once at the root (see `App.tsx`). The hook
+ * subscribes to every backend event the app cares about and funnels
+ * each payload into the Zustand store or into a side-effect publisher:
+ *
+ *   - `TRANSCRIPT_UPDATE`       → `addTranscriptSegment`
+ *   - `GRAPH_UPDATE`            → `setGraphSnapshot`
+ *   - `PIPELINE_STATUS`         → `setPipelineStatus`
+ *   - `SPEAKER_DETECTED`        → `addOrUpdateSpeaker`
+ *   - `CAPTURE_ERROR`           → `setError`
+ *   - `CAPTURE_BACKPRESSURE`    → `setSourceBackpressure`
+ *   - `CAPTURE_STORAGE_FULL`    → `publishStorageFull` (StorageBanner)
+ *   - `GEMINI_TRANSCRIPTION`    → `addGeminiTranscript`
+ *   - `GEMINI_RESPONSE`         → `addGeminiTranscript`
+ *   - `MODEL_DOWNLOAD_PROGRESS` → `downloadProgress` store slice
+ *   - `GEMINI_STATUS`           → classified toast + store update
+ *   - `AWS_ERROR`               → `setError` (localized via
+ *                                 `awsErrorToMessage`)
+ *
+ * The event names are duplicated here as top-of-file string constants
+ * so tests can assert on them; they must stay in sync with the Rust
+ * constants in `src-tauri/src/events.rs`.
+ *
+ * Error-routing helpers `routeGeminiError` and `awsErrorToMessage` are
+ * exported so unit tests and potential future diagnostics surfaces can
+ * reuse the exact same classification without duplicating the switch
+ * statements.
+ */
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import i18n from "../i18n";

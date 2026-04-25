@@ -1,3 +1,33 @@
+/**
+ * Root React component for the AudioGraph Tauri window.
+ *
+ * Layout (desktop-first):
+ *   - Top: `StorageBanner` (ENOSPC retry) + `DemoModeBanner` (first-launch
+ *     local-only hint) + `ControlBar` (Start/Stop, settings, sessions).
+ *   - Middle 3-column flex:
+ *       - Left  aside: `AudioSourceSelector` + `SpeakerPanel`
+ *       - Main:         `KnowledgeGraphViewer`
+ *       - Right aside: `LiveTranscript` / `ChatSidebar` (tabbed) +
+ *                      `TokenUsagePanel`
+ *   - Bottom: `PipelineStatusBar` (per-stage status dots).
+ *   - Overlays: error toast, `SettingsPage` modal, `SessionsBrowser` modal,
+ *     `ShortcutsHelpModal`, first-launch `ExpressSetup` quickstart,
+ *     `Toast` (transient status).
+ *
+ * Side-effects mounted at the root:
+ *   - `useTauriEvents()` subscribes to all backend events exactly once.
+ *   - `useKeyboardShortcuts()` registers global hotkeys (Cmd/Ctrl+R, Cmd/Ctrl+,
+ *     Cmd/Ctrl+Shift+S, Escape).
+ *   - A local `keydown` listener toggles the shortcuts help modal on
+ *     Cmd/Ctrl+/ or "?" (outside of typing contexts).
+ *
+ * First-launch Express Setup is triggered from this component: on mount we
+ * probe `credentials.yaml` via `load_credential_cmd` for any known cloud
+ * provider key. If none exist, `ExpressSetup` renders once; dismissal is
+ * transient (per-session), not persisted.
+ *
+ * No props — this component is the app shell.
+ */
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import AudioSourceSelector from "./components/AudioSourceSelector";

@@ -6,7 +6,7 @@
 //! was a truncated transcript file after the session ended.
 //!
 //! [`write_or_emit_storage_full`] replaces those silent writes: on ENOSPC /
-//! `ERROR_DISK_FULL` it emits a [`CAPTURE_STORAGE_FULL`] Tauri event (so the
+//! `ERROR_DISK_FULL` it emits a [`CAPTURE_STORAGE_FULL`](crate::events::CAPTURE_STORAGE_FULL) Tauri event (so the
 //! frontend can show a user-visible error), logs at `error`, and returns the
 //! underlying `io::Error` so the caller can stop the write loop. On any
 //! other I/O error it logs at `warn` and returns the error unchanged. On
@@ -26,7 +26,7 @@ use crate::events::{self, CaptureStorageFullPayload};
 /// Process-wide flag: `true` while we believe storage is full.
 ///
 /// Set by [`handle_write_error`] when it classifies an error as storage-full
-/// and emits [`CAPTURE_STORAGE_FULL`](events::CAPTURE_STORAGE_FULL). Cleared by
+/// and emits [`CAPTURE_STORAGE_FULL`](crate::events::CAPTURE_STORAGE_FULL)(events::CAPTURE_STORAGE_FULL). Cleared by
 /// [`clear_storage_full_flag`] when the user acknowledges via the UI and a
 /// probe confirms the disk again has room.
 ///
@@ -53,7 +53,7 @@ pub(crate) fn clear_storage_full_flag() {
 }
 
 /// Write `bytes` to `path` (truncating any existing file) and surface
-/// storage-full errors via the [`CAPTURE_STORAGE_FULL`] Tauri event.
+/// storage-full errors via the [`CAPTURE_STORAGE_FULL`](crate::events::CAPTURE_STORAGE_FULL) Tauri event.
 ///
 /// Semantics:
 /// - `Ok(())` on success.
@@ -77,7 +77,7 @@ pub fn write_or_emit_storage_full(
 }
 
 /// Classify an I/O error from an in-progress write and, if it is a storage-full
-/// condition, emit [`CAPTURE_STORAGE_FULL`] and log at `error`. Non-storage
+/// condition, emit [`CAPTURE_STORAGE_FULL`](crate::events::CAPTURE_STORAGE_FULL) and log at `error`. Non-storage
 /// errors are logged at `warn`.
 ///
 /// Use this inside writer threads that already own a file handle (e.g. the

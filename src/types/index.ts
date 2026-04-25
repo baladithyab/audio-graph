@@ -1,3 +1,32 @@
+/**
+ * IPC contract between the React frontend and the Rust backend.
+ *
+ * Every type in this file mirrors a serde-serialized struct or enum on
+ * the Rust side (look for matching `Serialize`/`Deserialize` derives
+ * under `src-tauri/src/`). Changes here require a matching change in
+ * Rust — and vice versa.
+ *
+ * Roughly grouped into:
+ *   - Audio capture (`AudioSourceInfo`, `ProcessInfo`, `AudioChunk`).
+ *   - Transcript + speaker (`TranscriptSegment`, `SpeakerInfo`).
+ *   - Knowledge graph (`GraphSnapshot`, `GraphNode`, `GraphLink`,
+ *     `GraphDelta`, `GraphStats`).
+ *   - Pipeline status + events (`PipelineStatus`, `StageStatus`,
+ *     `CaptureErrorPayload`, `CaptureBackpressurePayload`,
+ *     `CaptureStorageFullPayload`, `AwsErrorPayload`).
+ *   - Settings (`AppSettings` and the provider sub-types).
+ *   - Gemini Live events (`GeminiTranscriptionEvent`,
+ *     `GeminiResponseEvent`, `GeminiStatusEvent`,
+ *     `GeminiErrorCategory`, `UsageMetadata`).
+ *   - Error envelope (`AppErrorPayload`) — the structured shape Rust
+ *     emits when a command returns `Result<_, AppError>`. See
+ *     `src-tauri/src/error.rs`.
+ *   - Store type (`AudioGraphStore`) — the Zustand slice that reuses
+ *     most of the IPC types above.
+ *
+ * `ALLOWED_CREDENTIAL_KEYS` must stay in lockstep with
+ * `src-tauri/src/credentials/mod.rs::ALLOWED_CREDENTIAL_KEYS`.
+ */
 // Type aliases
 export type SourceId = string;
 export type SegmentId = string;

@@ -16,7 +16,7 @@ pub struct RuleBasedExtractor {
     capitalized_phrase: Regex,
     /// Matches company suffixes like "Inc", "Corp", "Ltd", "LLC", etc.
     company_suffix: Regex,
-    /// Matches common location indicators ("in <Place>", "at <Place>", etc.).
+    /// Matches common location indicators (`"in <Place>"`, `"at <Place>"`, etc.).
     location_patterns: Regex,
     /// Matches quoted terms (e.g., "machine learning", 'topic').
     quote_pattern: Regex,

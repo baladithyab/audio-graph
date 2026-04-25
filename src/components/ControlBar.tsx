@@ -1,3 +1,22 @@
+/**
+ * Top control bar — the primary capture-control surface.
+ *
+ * Renders:
+ *   - Capture Start/Stop toggle (mirrors the Cmd/Ctrl+R hotkey).
+ *   - Elapsed-time counter (MM:SS) while capturing.
+ *   - Transcribe toggle (per-session local/cloud ASR pipeline).
+ *   - Gemini Live toggle (independent WebSocket streaming path).
+ *   - Backpressure pill when any selected source is currently dropping.
+ *   - Settings and Sessions browser launchers.
+ *
+ * Reads from the Zustand store (`isCapturing`, `isTranscribing`,
+ * `isGeminiActive`, `captureStartTime`, `backpressuredSources`,
+ * `selectedSourceIds`, `audioSources`, `settings`) and dispatches via store
+ * actions (`startCapture`, `stopCapture`, `startTranscribe`, `stopTranscribe`,
+ * `startGemini`, `stopGemini`, `openSettings`, `openSessionsBrowser`).
+ *
+ * Parent: `App.tsx`. No props.
+ */
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { useAudioGraphStore } from "../store";

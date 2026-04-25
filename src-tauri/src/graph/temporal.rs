@@ -246,8 +246,8 @@ impl TemporalKnowledgeGraph {
     /// This is the main entry point for feeding data into the graph.
     ///
     /// After inserting entities and relations, enforces size limits by
-    /// evicting the oldest nodes/edges when [`MAX_NODES`] or [`MAX_EDGES`]
-    /// are exceeded.
+    /// evicting the oldest nodes/edges when `MAX_NODES` or `MAX_EDGES`
+    /// (see the consts in this module) are exceeded.
     pub fn process_extraction(
         &mut self,
         result: &ExtractionResult,

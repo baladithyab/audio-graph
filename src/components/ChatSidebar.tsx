@@ -1,3 +1,18 @@
+/**
+ * Chat sidebar — free-form chat turns grounded in the current knowledge
+ * graph.
+ *
+ * The user types a prompt; the backend `send_chat_message` command injects
+ * the latest `GraphSnapshot` as context so the LLM (local llama/mistralrs
+ * or an OpenAI-compatible API) can reason over extracted entities and
+ * relations. Auto-scrolls to the bottom on new messages.
+ *
+ * Store bindings: `chatMessages`, `isChatLoading`, `sendChatMessage`,
+ * `clearChatHistory`, `graphSnapshot`.
+ *
+ * Parent: `App.tsx` right-panel tab. No props — rendered only when the
+ * `rightPanelTab` store slice equals `"chat"`.
+ */
 import { useState, useRef, useEffect } from "react";
 import { useAudioGraphStore } from "../store";
 import type { ChatMessage } from "../types";

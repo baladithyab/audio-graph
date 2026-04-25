@@ -1,3 +1,21 @@
+/**
+ * Shared types, reducer, and constants for the `SettingsPage` form.
+ *
+ * The settings modal uses a single `useReducer` snapshot (`SettingsState`)
+ * so every sub-form (`AudioSettings`, `AsrProviderSettings`,
+ * `LlmProviderSettings`, `GeminiSettings`, `CredentialsManager`)
+ * dispatches against the same slice. This file holds:
+ *   - The discriminated unions for the pick-your-provider selectors
+ *     (`AsrType`, `LlmType`, `AwsCredentialMode`, `GeminiAuthType`).
+ *   - `SettingsState` (the full in-memory form) + `initialSettingsState`.
+ *   - The `settingsReducer` + the `setField(key, value)` action creator.
+ *   - Helpers for rendering model-readiness badges (`readinessBadge`) and
+ *     converting the flat reducer state into the nested Rust
+ *     `AwsCredentialSource` payload on save (`buildAwsCredentialSource`).
+ *
+ * Not a component — pure TypeScript. Kept next to the settings components
+ * because it is their private contract.
+ */
 import type { AwsCredentialSource, ModelReadiness } from "../types";
 
 export type AsrType =

@@ -1,3 +1,17 @@
+/**
+ * Keyboard shortcuts help modal — user-facing reference for the global
+ * hotkeys registered by `useKeyboardShortcuts`.
+ *
+ * Kept in sync manually with the hook (the `SHORTCUTS` list here is
+ * documentation, not a source of truth). Opened via Cmd/Ctrl+/ or "?"
+ * and dismissed via Escape, the close button, or a backdrop click.
+ *
+ * Props:
+ *   - `onClose`: invoked on dismiss; parent (`App.tsx`) clears its
+ *     local `shortcutsOpen` state.
+ *
+ * Focus-trapped via `useFocusTrap`.
+ */
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useFocusTrap } from "../hooks/useFocusTrap";

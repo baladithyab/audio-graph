@@ -1,3 +1,18 @@
+/**
+ * Knowledge graph viewer — the centre-panel force-directed 2D graph.
+ *
+ * Renders the current `GraphSnapshot` (entities as nodes, relations as
+ * edges) using `react-force-graph-2d`. A `ResizeObserver` keeps the canvas
+ * sized to its parent container; node radius scales with `val` (mention
+ * count). Click-to-focus, hover tooltip, and a JSON export button that
+ * dumps the current graph via `exportGraph` + `downloadAsFile` are wired in
+ * this component.
+ *
+ * Store bindings: `graphSnapshot` (re-rendered on `GRAPH_UPDATE` events
+ * via `useTauriEvents`), `exportGraph`, `getSessionId`.
+ *
+ * Parent: `App.tsx` main panel. No props.
+ */
 import { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import ForceGraph2D, {
   type ForceGraphMethods,

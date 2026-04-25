@@ -2,8 +2,8 @@
 //!
 //! Wraps [`LlamaBackend`] and [`LlamaModel`] for in-process GGUF model
 //! inference.  Supports grammar-constrained entity extraction (via GBNF) and
-//! free-form chat generation.  A fresh [`LlamaContext`] is created per
-//! inference call because `LlamaContext` is **not** `Send`.
+//! free-form chat generation.  A fresh `LlamaContext` (from `llama_cpp_2`) is
+//! created per inference call because `LlamaContext` is **not** `Send`.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;

@@ -1,3 +1,25 @@
+/**
+ * Sessions browser modal — lets the user inspect, restore, and delete
+ * past capture sessions.
+ *
+ * Source of truth is the `sessions.json` index in `~/.audiograph/` —
+ * `list_sessions` returns all known sessions, `load_session_transcript`
+ * fetches a session's transcript for preview, `restore_session` makes
+ * one the active session, `delete_session` soft-deletes (marks for
+ * expiry), `delete_session_permanently` hard-deletes, and
+ * `purge_expired_sessions` cleans up old soft-deletes.
+ *
+ * Sort mode (`newest | oldest | nameAsc | nameDesc | largest`) is
+ * persisted to `localStorage` under `audiograph:sessionsBrowser:sort`
+ * so it survives reloads independent of the Rust-side settings file.
+ *
+ * Focus-trapped via `useFocusTrap`. Escape handled at the app level by
+ * `useKeyboardShortcuts`.
+ *
+ * Store bindings: `sessionsBrowserOpen`, `closeSessionsBrowser`.
+ *
+ * Parent: `App.tsx` (rendered conditionally). No props.
+ */
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAudioGraphStore } from "../store";

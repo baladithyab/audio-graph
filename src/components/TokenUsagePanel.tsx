@@ -1,3 +1,19 @@
+/**
+ * Token usage panel — shows Gemini Live token totals for the current
+ * session alongside a lifetime accumulator.
+ *
+ * The authoritative on-disk record lives at
+ * `~/.audiograph/usage/<session_id>.json` and is written by the backend's
+ * `TurnComplete` handler (see `src-tauri/src/sessions/usage.rs`). This
+ * component mirrors that store in the frontend by (a) seeding from
+ * `localStorage` (`tokens.session.v1` / `tokens.lifetime.v1`) for fast
+ * first-paint, (b) re-fetching via `get_current_session_usage` /
+ * `get_lifetime_usage` commands on mount, and (c) incrementally applying
+ * `UsageMetadata` frames delivered on `GEMINI_STATUS` events.
+ *
+ * Parent: `App.tsx` right panel (bottom, always visible beneath the tab
+ * content). No props.
+ */
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";

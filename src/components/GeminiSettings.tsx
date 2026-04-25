@@ -1,3 +1,19 @@
+/**
+ * Gemini Live sub-form — auth + model configuration for the dedicated
+ * Gemini WebSocket path (distinct from the generic "LLM" selector).
+ *
+ * Auth modes:
+ *   - `api_key`   — AI Studio API key (plain header auth).
+ *   - `vertex_ai` — Google Cloud service account + project + location for
+ *                   Vertex AI bearer-token auth (via `gcp_auth`).
+ *
+ * Model picker covers the Gemini Live-capable variants (e.g.
+ * `gemini-2.0-flash-exp`); language picker is documented separately in
+ * `docs/GEMINI_LANGUAGES.md`.
+ *
+ * Parent: `SettingsPage.tsx`. Props: narrowed reducer slice + dispatch +
+ * translation handle + `testingKey` for the Test-API-key button.
+ */
 import type { Dispatch, ReactNode } from "react";
 import type { TFunction } from "i18next";
 import {

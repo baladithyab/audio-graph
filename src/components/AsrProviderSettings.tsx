@@ -1,3 +1,22 @@
+/**
+ * ASR provider sub-form — the choose-your-ASR surface inside
+ * `SettingsPage`.
+ *
+ * Renders one of several backend-specific sub-panels based on the
+ * reducer's current `asrType`:
+ *   - `local_whisper`  — Whisper model file + language picker.
+ *   - `api`            — OpenAI-compatible streaming endpoint + key.
+ *   - `aws_transcribe` — region + credential-mode selector
+ *                        (`default_chain` / `profile` / `access_keys`).
+ *   - `deepgram`       — API key + Deepgram model pick (nova-3, etc.).
+ *   - `assemblyai`     — API key.
+ *   - `sherpa_onnx`    — streaming Zipformer model selector (behind the
+ *                        `sherpa-streaming` cargo feature).
+ *
+ * Parent: `SettingsPage.tsx`. Props: a narrowed reducer slice + dispatch
+ * + translation handle + `testingKey` so concurrent "Test connection"
+ * buttons stay disabled while any test is in flight.
+ */
 import type { Dispatch, ReactNode } from "react";
 import type { TFunction } from "i18next";
 import { invoke } from "@tauri-apps/api/core";

@@ -12,7 +12,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 ///
 /// IMPORTANT: this must stay in sync with the frontend constant
 /// `ALLOWED_CREDENTIAL_KEYS` in `src/types/index.ts` and with the match arms
-/// in [`set_field`] / `load_credential_cmd`.
+/// in `set_field` / `load_credential_cmd`.
 pub const ALLOWED_CREDENTIAL_KEYS: &[&str] = &[
     "openai_api_key",
     "groq_api_key",

@@ -382,7 +382,7 @@ impl TranscriptWriter {
 /// Save a serializable value as pretty-printed JSON to a file.
 ///
 /// Uses an atomic write (tmp file + rename) so a partial write never replaces
-/// a known-good file. I/O errors are classified via [`io::handle_write_error`]
+/// a known-good file. I/O errors are classified via `io::handle_write_error`
 /// so ENOSPC on the tmp file emits `CAPTURE_STORAGE_FULL` to the UI; other
 /// errors fall through to the legacy string-return path.
 pub fn save_json<T: serde::Serialize>(value: &T, path: &Path) -> Result<(), String> {

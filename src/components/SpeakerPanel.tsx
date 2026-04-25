@@ -1,3 +1,16 @@
+/**
+ * Speakers panel — compact list of detected speakers with per-speaker
+ * colour swatch, human-readable talk time, and segment count badge.
+ *
+ * The backend diarization worker (see `src-tauri/src/diarization/mod.rs`)
+ * emits `SPEAKER_DETECTED` events which `useTauriEvents` funnels into the
+ * store. This component simply reflects that state — it is purely
+ * presentational and carries no local UI state.
+ *
+ * Store bindings: `speakers`.
+ *
+ * Parent: `App.tsx` left panel. No props.
+ */
 import { useAudioGraphStore } from "../store";
 import { formatDuration } from "../utils/format";
 

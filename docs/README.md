@@ -19,9 +19,18 @@ Entry point for all AudioGraph documentation. See the main [`README`](../README.
 
 ## Reviews and retrospectives
 
-- [`reviews/`](reviews/) — loop-by-loop code review notes (loop10 through loop17).
+- [`reviews/`](reviews/) — loop-by-loop code review notes
+  (`audio-graph-review-loop10.md` through `audio-graph-review-loop23.md`)
+  plus the wave-based follow-ups (`audio-graph-wave-a-review.md`,
+  `audio-graph-wave-b-review.md`).
 - [`reviews/gap-analysis.md`](reviews/gap-analysis.md) — outstanding gaps across the product.
 - [`reviews/ux-first-run-review.md`](reviews/ux-first-run-review.md) — first-run UX audit.
+
+## Documentation audits
+
+- [`audit/docs-queue.md`](audit/docs-queue.md) — recursive doc-gap queue
+  driving the latest sweep. Records what was queued, in progress, and
+  done.
 
 ## Release and contributing
 

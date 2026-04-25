@@ -1,3 +1,21 @@
+/**
+ * Live transcript panel — scrolling list of transcribed segments tagged by
+ * speaker and timestamp.
+ *
+ * Each entry shows `[MM:SS] SpeakerLabel: text` colored by the speaker's
+ * assigned palette entry (or a fallback). Auto-follows the tail only when
+ * the user was already near the bottom — scrolling up to inspect earlier
+ * segments cancels auto-follow until the user re-reaches the end.
+ *
+ * Exports: TXT (via `transcriptToTxt`) or JSON (via the backend's
+ * `export_transcript` command); both funnel through `downloadAsFile`.
+ *
+ * Store bindings: `transcriptSegments`, `speakers`, `exportTranscript`,
+ * `getSessionId`.
+ *
+ * Parent: `App.tsx` right-panel tab. Rendered only when `rightPanelTab`
+ * equals `"transcript"`. No props.
+ */
 import { useRef, useEffect, useMemo, useCallback, useState } from "react";
 import { useAudioGraphStore } from "../store";
 import { formatTime } from "../utils/format";

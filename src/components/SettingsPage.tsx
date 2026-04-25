@@ -1,3 +1,23 @@
+/**
+ * Settings modal — the full configuration surface for the app.
+ *
+ * Composes five sub-forms (`AudioSettings`, `AsrProviderSettings`,
+ * `LlmProviderSettings`, `GeminiSettings`, `CredentialsManager`) around a
+ * shared `useReducer`-based form state (see `settingsTypes.ts`). The
+ * reducer lives in this component so every sub-form dispatches against
+ * the same snapshot; the top-level "Save" button invokes
+ * `save_settings_cmd` once with the full patched `AppSettings`.
+ *
+ * Focus is trapped in the modal via `useFocusTrap` and release on unmount.
+ * Escape is handled by `useKeyboardShortcuts` at the App level.
+ *
+ * Store bindings: `settings` (seed), `loadSettings`, `settingsOpen`,
+ * `closeSettings` — `openSettings` is invoked from `ControlBar` /
+ * `App.tsx` keyboard handler / `ExpressSetup` Advanced link.
+ *
+ * Parent: `App.tsx` (rendered conditionally when `settingsOpen` is true).
+ * No props.
+ */
 import { useEffect, useReducer } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";

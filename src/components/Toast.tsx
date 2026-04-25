@@ -1,3 +1,18 @@
+/**
+ * Transient toast notification — single-slot by design.
+ *
+ * The module-level `showToast(payload)` publisher is called from anywhere
+ * (hooks, stores, other components) to surface a short status message.
+ * Only one toast is visible at a time; a new `showToast` call replaces
+ * the current one. Auto-dismisses after `AUTO_DISMISS_MS` (3.5s) and
+ * supports manual dismiss via the close button.
+ *
+ * Variants: `success | info | warning | error`, each mapping to a CSS
+ * modifier (`.app-toast--<variant>`).
+ *
+ * Parent: `App.tsx` (always mounted). No props — state is carried via
+ * the publisher + listener set.
+ */
 import { useEffect, useState } from "react";
 
 export type ToastVariant = "success" | "info" | "warning" | "error";

@@ -1,3 +1,21 @@
+/**
+ * First-launch quickstart wizard.
+ *
+ * Rendered once when `App.tsx` detects no cloud provider credentials on
+ * launch. Offers a narrowed choice of ASR + LLM providers (Gemini /
+ * Deepgram / AssemblyAI / local Whisper × OpenAI / Anthropic / local
+ * llama / OpenRouter) and writes the selected credentials via
+ * `save_credential_cmd` plus the provider pick via `save_settings_cmd`.
+ *
+ * Props:
+ *   - `onDismiss`: close the modal (`Skip` or successful save).
+ *   - `onOpenAdvanced`: hand off to the full `SettingsPage` — the parent
+ *     `App.tsx` sets `expressSetupVisible = false` then opens Settings
+ *     so the two modals don't stack.
+ *
+ * Focus-trapped via `useFocusTrap`. No store binding beyond the store
+ * actions it triggers via the backend.
+ */
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";

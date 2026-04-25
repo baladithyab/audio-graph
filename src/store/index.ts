@@ -1,3 +1,44 @@
+/**
+ * Global frontend store (Zustand) — the single source of truth for UI
+ * state plus the invoke-bridge to the Rust backend.
+ *
+ * Slice layout:
+ *   - Audio sources          — `audioSources`, `selectedSourceIds`,
+ *                              `searchFilter`, `processes` + fetchers.
+ *   - Capture lifecycle      — `isCapturing`, `captureStartTime`,
+ *                              `startCapture` / `stopCapture` (wrap
+ *                              `start_capture` / `stop_capture`).
+ *   - Transcribe pipeline    — `isTranscribing`, `startTranscribe` /
+ *                              `stopTranscribe` + the live
+ *                              `transcriptSegments` buffer populated by
+ *                              `TRANSCRIPT_UPDATE` events.
+ *   - Gemini Live            — `isGeminiActive`, `startGemini` /
+ *                              `stopGemini`, plus the separate
+ *                              `geminiTranscripts` buffer appended by
+ *                              `GEMINI_TRANSCRIPTION` events.
+ *   - Knowledge graph        — `graphSnapshot` (refreshed on
+ *                              `GRAPH_UPDATE`) + the `exportGraph` and
+ *                              `getSessionId` command wrappers.
+ *   - Speakers               — `speakers` (upserted on
+ *                              `SPEAKER_DETECTED` events).
+ *   - Pipeline status        — `pipelineStatus` + per-source
+ *                              `backpressuredSources` set.
+ *   - Chat                   — `chatMessages`, `isChatLoading`,
+ *                              `sendChatMessage`, `clearChatHistory`.
+ *   - Settings / UI          — `settings`, `loadSettings`,
+ *                              `settingsOpen` / `sessionsBrowserOpen`
+ *                              modal flags + `rightPanelTab` tab state.
+ *   - Error + toast wiring   — `error`, `setError`, `clearError`.
+ *
+ * The invoke-bridge contract: each async action that touches Rust
+ * wraps `invoke<T>(command, args)` and translates thrown errors via
+ * `utils/errorToMessage`. Events flow the other way — `useTauriEvents`
+ * mutates this store on every backend event. See that hook for the
+ * full list of subscriptions.
+ *
+ * Unit tests that exercise slices pull `useAudioGraphStore.getState()`
+ * directly and `setState` to seed fixtures.
+ */
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type {

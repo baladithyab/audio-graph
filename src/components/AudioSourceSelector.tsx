@@ -1,3 +1,23 @@
+/**
+ * Grouped audio-source selector — the left-column picker where the user
+ * chooses what to capture.
+ *
+ * Sources are grouped into four categories (System / Devices / Applications /
+ * Running Processes) with a fixed display order. Selection is multi-select
+ * (an array of source-id strings stored in the Zustand store); capture can
+ * bind to any combination, which the Rust backend later multiplexes into the
+ * processing pipeline.
+ *
+ * A search filter narrows the visible rows across all groups. While capture
+ * is active the list is disabled so the user cannot mutate the selected set
+ * mid-session — they must stop capture first.
+ *
+ * Store bindings: `audioSources`, `selectedSourceIds`, `toggleSourceId`,
+ * `fetchSources`, `isCapturing`, `processes`, `searchFilter`,
+ * `setSearchFilter`, `fetchProcesses`.
+ *
+ * Parent: `App.tsx` (left panel). No props.
+ */
 import { useEffect, useMemo, useCallback } from "react";
 import { useAudioGraphStore } from "../store";
 import type { AudioSourceInfo } from "../types";

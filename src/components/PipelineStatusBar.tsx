@@ -1,3 +1,17 @@
+/**
+ * Bottom status bar — one dot per pipeline stage showing Idle / Running /
+ * Error, fed by the `PIPELINE_STATUS_EVENT` backend event.
+ *
+ * Stages (in processing order): Capture → Resample → ASR → Diarization →
+ * Extraction → Graph. Each stage shows an icon, label, and a coloured dot
+ * whose modifier class is derived from `StageStatus.type`. The tooltip
+ * surfaces the processed-count (Running) or error message (Error).
+ *
+ * Store bindings: `pipelineStatus` (the full `PipelineStatus` payload from
+ * Rust).
+ *
+ * Parent: `App.tsx` (bottom of layout). No props — purely reflective.
+ */
 import { useAudioGraphStore } from "../store";
 import type { StageStatus } from "../types";
 

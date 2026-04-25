@@ -1,3 +1,29 @@
+/**
+ * Credentials manager — sub-form in `SettingsPage` for editing provider
+ * API keys and related credential state (AWS profile/region, Google
+ * service account path, etc.).
+ *
+ * This file actually composes three surfaces:
+ *   1. A row per allow-listed credential key with show/hide, save,
+ *      delete, and (where applicable) "Test connection" controls that
+ *      invoke the provider-specific test commands
+ *      (`test_cloud_asr_connection`, `test_deepgram_connection`,
+ *      `test_assemblyai_connection`, `test_gemini_api_key`,
+ *      `test_aws_credentials`).
+ *   2. A log-level switch (persisted via `save_settings_cmd` +
+ *      `set_log_level`).
+ *   3. A models-readiness panel (Whisper / llama / sortformer) showing
+ *      `ModelStatus` badges from the store.
+ *
+ * Secrets live in-memory as plain strings while the form is open, but
+ * are zeroized on the Rust side once `save_credential_cmd` writes them
+ * to `credentials.yaml`. The allow-list is kept consistent via
+ * `ALLOWED_CREDENTIAL_KEYS` in both `src/types/index.ts` and
+ * `src-tauri/src/credentials/mod.rs`.
+ *
+ * Parent: `SettingsPage.tsx`. Props are the reducer `state` / `dispatch`
+ * + translation handle; see the inline type below.
+ */
 import type { TFunction } from "i18next";
 import {
   readinessBadge,
